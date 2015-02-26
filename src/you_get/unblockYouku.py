@@ -1,7 +1,10 @@
+#!/usr/bin/python3
+# vim:fileencoding=utf-8:sw=4:et
+
 import sys
 import os
+import io
 import re
-import json
 try:
     from urllib import request
     from urllib import parse as urlparse
@@ -11,7 +14,16 @@ except:
 
 EXPIRE_TIMEOUT = 60*60*24*7 # one week
 
-data_folder = os.path.expandvars("%APPDATA%/unblock_youku")
+if sys.platform == "win32":
+    data_folder = os.path.expandvars("%APPDATA%/unblock_youku")
+elif sys.platform == "darwin":
+    data_folder = os.path.expandvars("$HOME/Library/Caches/unblock_youku")
+elif sys.platform.startswith("linux"):
+    data_folder = os.path.expandvars("$HOME/.cache/unblock_youku")
+else:
+    data_folder = os.path.expandvars("$HOME/.cache/unblock_youku")
+#print(data_folder); sys.exit()
+
 data_folder = os.path.normpath(data_folder)
 if not os.path.exists(data_folder):
     os.makedirs(data_folder)
@@ -34,7 +46,7 @@ class UnblockUkuFilter:
         self.url_filters = None # the unblock youku url filters
         self.proxy_str = None
         self.get_uku_data()
-        
+
     def parse_uku(self, text):
         new_lines = []
         for line in text.splitlines():
@@ -54,9 +66,7 @@ class UnblockUkuFilter:
 
         text_new = ("\n".join(new_lines))
         #print(text_new)
-        
-        #data = json.loads("[" + text_new + "]")
-        #data = json.loads("[]")
+
         unblock_youku = _uObject()
         data = {"unblock_youku": unblock_youku}
         exec(text_new, data)
@@ -66,12 +76,17 @@ class UnblockUkuFilter:
     def load_local_data(self, dpath=data_path):
         """load filter file cotent from local cache"""
         ret = None
-        if os.path.exists(dpath):
+        expired = True
+
+        if os.path.exists(dpath) and os.path.getsize(dpath) > 0:
             mtime = os.path.getmtime(dpath)
             import time
             now = time.time()
-            if mtime + self.expire_timeout > now or self.expire_timeout < 0:
-                ret = open(dpath).read()
+            if  self.expire_timeout < 0 or mtime + self.expire_timeout > now:
+                expired = False
+
+        if expired == False:
+            ret = io.open(dpath, encoding="utf-8").read()
         return ret
 
     def get_ubu_urls(self, url=UKU_DATA_URL, dpath=data_path):
@@ -84,7 +99,8 @@ class UnblockUkuFilter:
         content = fd.read()
         fd.close()
         if content:
-            fdw = open(dpath, "w")
+            content = content.decode("utf-8")
+            fdw = io.open(dpath, "w", encoding="utf-8")
             fdw.write(content)
             fdw.close()
         return content
@@ -143,7 +159,7 @@ class UnblockUkuFilter:
 class UnblockYoukuProxy(request.ProxyHandler):
     def __init__(self, proxies=None):
         self.uku_filter = UnblockUkuFilter()
-        
+
         proxies = {
                 "http": self.uku_filter.proxy_str,
                 "https": self.uku_filter.proxy_str,
@@ -169,11 +185,11 @@ class UnblockYoukuProxy(request.ProxyHandler):
 
 def main():
     #fname = sys.argv[1]
-    #text = open(fname).read()
+    #text = io.open(fname, encoding="utf-8").read()
     uku = UnblockUkuFilter()
     #data = uku.parse_uku(text)
     print(uku.proxy_str)
 
 if __name__ == "__main__":
     main()
-    
+
