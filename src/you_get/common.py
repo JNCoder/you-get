@@ -753,8 +753,8 @@ def set_proxy(proxy):
     })
 
     if proxy[0].replace("-", "").lower() == "unblockyouku":
-        from . import unblockYouku
-        proxy_handler = unblockYouku.UnblockYoukuProxy()
+        from . import unblock_youku
+        proxy_handler = unblock_youku.UnblockYoukuProxy()
 
     opener = request.build_opener(proxy_handler)
     request.install_opener(opener)
