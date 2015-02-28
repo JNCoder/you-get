@@ -9,6 +9,7 @@ import queue
 import collections
 import sqlite3
 import socket
+import json
 
 import tkinter
 import tkinter.font
@@ -59,15 +60,17 @@ def num2human(num, kunit=1000):
 
 def setup_folder():
     """Setup data folder for cross-platform"""
+    appname = "you-get"
     locations = {
-            "win32": "%APPDATA%/unblock_youku",
-            "darwin": "$HOME/Library/Application Support/unblock_youku",
-            "linux": "$HOME/.local/share/unblock_youku",
+            "win32": "%APPDATA%",
+            "darwin": "$HOME/Library/Application Support",
+            "linux": "$HOME/.local/share",
             }
     if sys.platform in locations:
         data_folder = locations[sys.platform]
     else:
         data_folder = locations["linux"]
+    data_folder = os.path.join(data_folder, appname)
 
     data_folder = os.path.expandvars(data_folder)
     data_folder = os.path.normpath(data_folder)
@@ -111,6 +114,7 @@ class YouGetDB:
             origin TEXT UNIQUE,
             output_dir TEXT,
             do_playlist BOOLEAN,
+            playlist TEXT,
             merge BOOLEAN,
             extractor_proxy TEXT,
             use_extractor_proxy BOOLEAN,
@@ -253,12 +257,16 @@ class Task:
         self.title = None
         self.real_urls = None # a list of urls
         self.filepath = None
+        self.playlist = None
         self.thread = None
         self.total_size = 0
         self.received = 0 # keep a record of progress changes
         self.finished = False
         self.success = 0
         self.need_save = False
+
+        if self.do_playlist:
+            self.playlist = set()
 
         self.lock = threading.Lock()
 
@@ -292,9 +300,13 @@ class Task:
         of the given task"""
         self.real_urls = urls
         self.filepath = filepath
-        self.title = os.path.basename(filepath)
+        if self.title is None: # keep the first filename as title
+            self.title = os.path.basename(filepath)
         self.progress_bar = bar
         self.set_need_save(True)
+        if self.do_playlist and filepath not in self.playlist:
+            f = os.path.basename(filepath)
+            self.playlist.add(f)
 
     def set_need_save(self, value):
         self.lock.acquire()
@@ -331,6 +343,10 @@ class Task:
                 ]
         data = {x: getattr(self, x, None) for x in keys }
         data["total_size"] = self.get_total()
+        if self.do_playlist:
+            data["playlist"] = json.dumps(list(self.playlist))
+        else:
+            data["playlist"] = json.dumps(self.playlist)
         return data
 
     def start(self):
@@ -465,34 +481,40 @@ class AddTaskDialog(simpledialog.Dialog):
         ttk.Label(master, text="URL:").grid(row=0, sticky="e")
         ttk.Label(master, text="Dir:").grid(row=1, sticky="e")
         ttk.Label(master, text="Extractor Proxy:").grid(row=2, sticky="e")
+        ttk.Label(master, text="Playlist:").grid(row=3, sticky="e")
 
 
-        self.e1 = ttk.Entry(master, width=80, exportselection=False)
-        self.e2 = ttk.Entry(master, width=80)
-        self.e3 = ttk.Entry(master, width=80)
+        self.e_url = ttk.Entry(master, width=80, exportselection=False)
+        self.e_dir = ttk.Entry(master, width=80)
+        self.e_xproxy = ttk.Entry(master, width=80)
 
         self.use_xproxy_var = tkinter.IntVar()
         self.use_xproxy_var.trace("w", self.on_use_xproxy_changed)
-        self.c1 = ttk.Checkbutton(master, variable=self.use_xproxy_var)
+        self.c_uxproxy = ttk.Checkbutton(master, variable=self.use_xproxy_var)
+
+        self.playlist_var = tkinter.IntVar()
+        self.c_playlist = ttk.Checkbutton(master, variable=self.playlist_var)
 
         padx = 6
         pady = 4
-        self.e1.grid(row=0, column=1)
-        self.e2.grid(row=1, column=1)
-        self.e3.grid(row=2, column=1)
-        self.c1.grid(row=2, column=2, padx=padx, pady=pady, sticky="w")
+        self.e_url.grid(row=0, column=1, padx=padx, pady=pady,)
+        self.e_dir.grid(row=1, column=1, padx=padx, pady=pady,)
+        self.e_xproxy.grid(row=2, column=1, padx=padx, pady=pady,)
+        self.c_uxproxy.grid(row=2, column=2, padx=padx, pady=pady, sticky="w")
 
-        self.b1 = ttk.Button(master, text="Browse", underline="0",
+        self.b_browse = ttk.Button(master, text="Browse", underline="0",
                 command=self.on_browse_directory)
-        self.b1.grid(row=1, column=2, padx=padx, pady=pady)
+        self.b_browse.grid(row=1, column=2, padx=padx, pady=pady)
         self.bind("<Control-b>", self.on_browse_directory)
+
+        self.c_playlist.grid(row=3, column=1, padx=padx, pady=pady, sticky="w")
 
         # default settings
         if self.settings.get("output_dir", None):
             self.set_path(self.settings["output_dir"])
         if self.settings.get("extractor_proxy", None):
-            self.e3.delete(0, "end")
-            self.e3.insert(0, self.settings["extractor_proxy"])
+            self.e_xproxy.delete(0, "end")
+            self.e_xproxy.insert(0, self.settings["extractor_proxy"])
         if self.settings.get("use_extractor_proxy", False):
             self.use_xproxy_var.set(True)
         else:
@@ -500,27 +522,27 @@ class AddTaskDialog(simpledialog.Dialog):
 
         # init URL entry with clipboard content
         try:
-            clip_text = self.e1.selection_get()
+            clip_text = self.e_url.selection_get()
             if clip_text and clip_text.startswith("http"):
-                self.e1.delete(0, "end")
-                self.e1.insert(0, clip_text)
-                self.e1.select_range(0, "end")
+                self.e_url.delete(0, "end")
+                self.e_url.insert(0, clip_text)
+                self.e_url.select_range(0, "end")
         except tkinter.TclError:
             # nothing in clipboard/selection
             pass
 
         self.result = None
-        return self.e1 # initial focus
+        return self.e_url # initial focus
 
     def on_use_xproxy_changed(self, *args):
         if self.use_xproxy_var.get():
-            self.e3.configure(state="normal")
+            self.e_xproxy.configure(state="normal")
         else:
-            self.e3.configure(state="disabled")
+            self.e_xproxy.configure(state="disabled")
 
     def on_browse_directory(self, *args):
         """Get directory by GUI"""
-        current_dir = self.e2.get()
+        current_dir = self.e_dir.get()
         output_dir = filedialog.askdirectory(initialdir=current_dir,
                 title="You-Get Output Directory")
         if output_dir:
@@ -529,19 +551,21 @@ class AddTaskDialog(simpledialog.Dialog):
     def set_path(self, path):
         """Set directory for output_dir entry"""
         self.output_dir = path
-        self.e2.delete(0, "end")
-        self.e2.insert(0, path)
+        self.e_dir.delete(0, "end")
+        self.e_dir.insert(0, path)
 
     def apply(self):
-        url = self.e1.get()
-        output_dir = self.e2.get()
-        extractor_proxy = self.e3.get()
+        url = self.e_url.get()
+        output_dir = self.e_dir.get()
+        extractor_proxy = self.e_xproxy.get()
         use_xproxy = True if self.use_xproxy_var.get() else False
+        do_playlist = True if self.playlist_var.get() else False
         info = {
                 "url": url,
                 "output_dir": output_dir,
                 "extractor_proxy": extractor_proxy,
                 "use_extractor_proxy": use_xproxy,
+                "do_playlist": do_playlist,
                 }
         self.result = info
         #print (info) # or something
@@ -723,6 +747,10 @@ class App(ttk.Frame):
             for key in row.keys():
                 if hasattr(atask, key):
                     setattr(atask, key, row[key])
+            playlist = json.loads(row["playlist"])
+            if atask.do_playlist:
+                playlist = set(playlist)
+            atask.playlist = playlist
 
             #for k in row.keys(): print(row[k])
             if atask.success < 1:
@@ -740,11 +768,18 @@ class App(ttk.Frame):
         data = atask.get_database_data()
         data["total"] = num2human(data["total_size"]) + "B"
         data["received"] = num2human(data["received"]) + "B"
+        data["playlist"] = json.loads(data["playlist"])
+
+        bool_keys = ["use_extractor_proxy", "do_playlist"]
+        for k in bool_keys:
+            data[k] = "ON" if data[k] else "OFF"
         if data["filepath"]:
             data["basename"] = os.path.basename(data["filepath"])
         else:
             data["basename"] = ""
+
         #print(data)
+
         msg = """\
       File: {basename:}
        Dir: {output_dir:}
@@ -756,6 +791,13 @@ class App(ttk.Frame):
     XProxy: {extractor_proxy:} [{use_extractor_proxy:}]
     Origin: {origin:}
 """.format(**data)
+
+        if data["playlist"]:
+            playlist = sorted(data["playlist"])
+            indent = " " * 12
+            playlist = ("\n" + indent).join(playlist)
+            msg = """{}
+     Files: {}\n""".format(msg, playlist)
 
         self.textview.configure(state="normal")
         self.textview.delete("1.0", "end")
@@ -936,12 +978,13 @@ class App(ttk.Frame):
     def stop(self, *args):
         self.save_config() # need to done before mainloop stop
         self.parent.withdraw() # hide main window immediately
-        self.quit()
+        self.parent.quit()
 
         task_items = self.task_manager.get_tasks()
         for origin, atask in task_items:
             atask.save_db(self.database)
         self.database.try_vacuum()
+        self.parent.destroy() # quit() won't do when other dialogs were up.
 
 def main(**kwargs):
     def set_stdio_encoding(enc=NATIVE):
