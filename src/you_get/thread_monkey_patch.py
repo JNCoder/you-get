@@ -56,7 +56,6 @@ def thread_download_urls(urls, title, ext, total_size, output_dir='.', refer=Non
     thread_me = threading.current_thread()
     #print("download task of current thread:", thread_me.download_task)
     try:
-        print(thread_me.name, filepath, urls, bar.total_size)
         thread_me.download_task.update_task_status(urls, filepath, bar)
     except AttributeError:
         pass
