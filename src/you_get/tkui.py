@@ -305,10 +305,12 @@ class Task:
         current_data = self.get_database_data()
         old_data = db.get_task_values(self.origin)
         new_info = {}
+        old_keys = set(old_data.keys()) # old_data is not really a dict.
         for k, v in current_data.items():
-            if (k not in old_data) or (old_data[k] != v):
+            if (k not in old_keys) or (old_data[k] != v):
                 new_info[k] = v
-        db.set_task_values(self.origin, new_info)
+        if len(new_info) > 0:
+            db.set_task_values(self.origin, new_info)
         self.set_need_save(False)
 
     def get_database_data(self):
@@ -821,7 +823,7 @@ class App(ttk.Frame):
         tree.insert("", index, iid=atask.origin, values=cols, tags=[tag])
 
     def update_task(self):
-        """Update task status periodically"""
+        """Update task status"""
         tree = self.tree_task
         items = self.task_manager.get_tasks()
         for origin, atask in items:
@@ -853,9 +855,6 @@ class App(ttk.Frame):
                 tree.set(origin, 2, percent)
 
         self.task_manager.update_task_queue()
-        self.check_log()
-
-        self.parent.after(1000, self.update_task) # in ms
 
     def check_log(self):
         lqueue = self.log_queue
@@ -917,17 +916,32 @@ class App(ttk.Frame):
             config["settings_" + k] = v
         self.database.save_config(config)
 
-    def start(self):
+    def periodic_update_1s(self):
+        """Do some periodic update work"""
+        timeout = 1000 # in mseconds
+        self.check_log()
+
+        self.parent.after(timeout, self.periodic_update_1s)
+
+    def periodic_update_5s(self):
+        timeout = 5000 # in mseconds
         self.update_task()
+        self.parent.after(timeout, self.periodic_update_5s)
+
+    def start(self):
+        self.periodic_update_1s()
+        self.periodic_update_5s()
         self.parent.mainloop()
 
     def stop(self, *args):
+        self.save_config() # need to done before mainloop stop
+        self.parent.withdraw() # hide main window immediately
+        self.quit()
+
         task_items = self.task_manager.get_tasks()
         for origin, atask in task_items:
             atask.save_db(self.database)
-        self.save_config()
         self.database.try_vacuum()
-        self.quit()
 
 def main(**kwargs):
     def set_stdio_encoding(enc=NATIVE):
