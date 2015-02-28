@@ -938,6 +938,7 @@ def main(**kwargs):
     set_stdio_encoding()
 
     from . import thread_monkey_patch
+    thread_monkey_patch.monkey_patch_urllib_request()
     thread_monkey_patch.monkey_patch_common()
 
     root = tkinter.Tk()

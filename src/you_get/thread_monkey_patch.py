@@ -14,9 +14,25 @@ import threading
 from . import common
 from .common import tr, urls_size, get_filename, url_save, url_save_chunked
 
-Origins = {} # kept original functions
+import urllib.request as request
+import socket
 
-def tkui_download_urls(urls, title, ext, total_size, output_dir='.', refer=None, merge=True, faker=False):
+Origins = {} # kept original functions
+UI_Monkey = None
+
+def install_ui_monkey(ui_obj):
+    """Supply a GUI object to UIMonkey"""
+    global UI_Monkey
+    if UI_Monkey is None:
+        UI_Monkey = UIMonkey(ui_obj)
+
+
+class MyLocal(threading.local):
+    url_opener = None
+Thread_Local = MyLocal()
+
+# common.py
+def thread_download_urls(urls, title, ext, total_size, output_dir='.', refer=None, merge=True, faker=False):
     """download_urls() which register progress bar to taskManager"""
     assert urls
     force=False
@@ -40,6 +56,7 @@ def tkui_download_urls(urls, title, ext, total_size, output_dir='.', refer=None,
     thread_me = threading.current_thread()
     #print("download task of current thread:", thread_me.download_task)
     try:
+        print(thread_me.name, filepath, urls, bar.total_size)
         thread_me.download_task.update_task_status(urls, filepath, bar)
     except AttributeError:
         pass
@@ -106,7 +123,7 @@ def tkui_download_urls(urls, title, ext, total_size, output_dir='.', refer=None,
 
     print()
 
-def tkui_download_urls_chunked(urls, title, ext, total_size, output_dir='.', refer=None, merge=True, faker=False):
+def thread_download_urls_chunked(urls, title, ext, total_size, output_dir='.', refer=None, merge=True, faker=False):
     """download_urls_chunked() which register progress bar to taskManager"""
     assert urls
     force = False
@@ -216,8 +233,8 @@ def monkey_patch_common():
     m["download_urls_chunked"] = common.download_urls_chunked
     Origins["common"] = m
 
-    common.download_urls = tkui_download_urls
-    common.download_urls_chunked = tkui_download_urls_chunked
+    common.download_urls = thread_download_urls
+    common.download_urls_chunked = thread_download_urls_chunked
 
 class UIMonkey:
     """Monkey patch functions with an UI object"""
@@ -234,14 +251,7 @@ class UIMonkey:
             sys.stderr.flush()
         return ret
 
-UI_Monkey = None
-
-def install_ui_monkey(ui_obj):
-    """Supply a GUI object to UIMonkey"""
-    global UI_Monkey
-    if UI_Monkey is None:
-        UI_Monkey = UIMonkey(ui_obj)
-
+# util.log.py
 def monkey_patch_log():
     from .util import log
     m = {}
@@ -249,4 +259,45 @@ def monkey_patch_log():
     Origins["util.log"] = m
 
     log.sprint = UI_Monkey.sprint
+
+# urllib.request
+def thread_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
+            *, cafile=None, capath=None, cadefault=False):
+    build_opener = request.build_opener
+    _have_ssl = request._have_ssl
+    if _have_ssl:
+        ssl = request.ssl
+
+    _opener = Thread_Local.url_opener
+
+    if cafile or capath or cadefault:
+        if not _have_ssl:
+            raise ValueError('SSL support not available')
+        context = ssl._create_stdlib_context(cert_reqs=ssl.CERT_REQUIRED,
+                                             cafile=cafile,
+                                             capath=capath)
+        https_handler = request.HTTPSHandler(context=context,
+                check_hostname=True)
+        opener = build_opener(https_handler)
+    elif _opener is None:
+        _opener = opener = build_opener()
+        Thread_Local.url_opener = _opener
+    else:
+        opener = _opener
+
+    #print("my-opener", opener)
+    return opener.open(url, data, timeout)
+
+def thread_install_opener(opener):
+    Thread_Local.url_opener = opener
+
+def monkey_patch_urllib_request():
+    """Replace try to make urllib.request robust by avoiding global `_opener`"""
+    m = {}
+    m["urlopen"] = request.urlopen
+    m["install_opener"] = request.install_opener
+    Origins["common"] = m
+
+    request.urlopen = thread_urlopen
+    request.install_opener = thread_install_opener
 
