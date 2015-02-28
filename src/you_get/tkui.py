@@ -8,6 +8,7 @@ import threading
 import queue
 import collections
 import sqlite3
+import socket
 
 import tkinter
 import tkinter.font
@@ -18,8 +19,20 @@ from . import common
 from .util import log
 
 LOG_QUEUE_SIZE = 100
-MAX_LOG_LINES = 200
+MAX_LOG_LINES = 400
+LOG_COLOR_CODES = {
+        1:  "bold",
+        4:  "underline",
+        31: "red",
+        32: "green",
+        33: "yellow",
+        34: "blue",
+        }
+
 NATIVE=sys.getfilesystemencoding()
+
+socket_timeout = 60
+socket.setdefaulttimeout(socket_timeout)
 
 def num2human(num, kunit=1000):
     """Convert integer to human readable units"""
@@ -100,6 +113,7 @@ class YouGetDB:
             do_playlist BOOLEAN,
             merge BOOLEAN,
             extractor_proxy TEXT,
+            use_extractor_proxy BOOLEAN,
             stream_id TEXT,
             title TEXT,
             filepath TEXT,
@@ -201,6 +215,13 @@ class YouGetDB:
             cur.execute("VACUUM;")
             self.commit()
 
+def log_exc(msg=""):
+    """Convenient function to print exception"""
+    import traceback
+    tb_msg = traceback.format_exc(10)
+    err_msg = "{}\n{}".format(tb_msg, msg)
+    log.e(err_msg)
+
 def my_download_main(download, download_playlist, urls, playlist, **kwargs):
     ret = 1
     try:
@@ -208,20 +229,24 @@ def my_download_main(download, download_playlist, urls, playlist, **kwargs):
                 **kwargs)
     except:
         ret = -1
-        log.w("my_download_main() failed")
-        log.w(str(sys.exc_info()))
+        log_exc()
     if "task" in kwargs:
-        kwargs["task"].success += ret
+        if ret < 0:
+            kwargs["task"].success += ret
+        else:
+            kwargs["task"].success = ret
 
 class Task:
     """Represent a single download task"""
     def __init__(self, url=None, do_playlist=False, output_dir=".",
-            merge=True, extractor_proxy=None, stream_id=None):
+            merge=True, extractor_proxy=None, use_extractor_proxy=False,
+            stream_id=None):
         self.origin = url
         self.output_dir = output_dir
         self.do_playlist = do_playlist
         self.merge = merge
         self.extractor_proxy = extractor_proxy
+        self.use_extractor_proxy = use_extractor_proxy
         self.stream_id = stream_id
 
         self.progress_bar = None
@@ -281,7 +306,7 @@ class Task:
         old_data = db.get_task_values(self.origin)
         new_info = {}
         for k, v in current_data.items():
-            if old_data[k] != v:
+            if (k not in old_data) or (old_data[k] != v):
                 new_info[k] = v
         db.set_task_values(self.origin, new_info)
         self.set_need_save(False)
@@ -294,6 +319,7 @@ class Task:
                 "do_playlist",
                 "merge",
                 "extractor_proxy",
+                "use_extractor_proxy",
                 "stream_id",
                 "title",
                 "filepath",
@@ -312,9 +338,11 @@ class Task:
                 "output_dir": self.output_dir,
                 "merge": self.merge,
                 "info_only": False,
-                "extractor_proxy": self.extractor_proxy,
                 "task": self,
                 }
+        if self.use_extractor_proxy and self.extractor_proxy:
+            kwargs["extractor_proxy"] = self.extractor_proxy
+
         if self.stream_id:
             kwargs["stream_id"] = self.stream_id
 
@@ -335,6 +363,7 @@ class TaskManager:
         self.task_running_queue = []
         self.task_waiting_queue = collections.deque()
         self.max_task = 5
+        self.max_retry = 3
 
     def start_download(self, info):
         """Start a download task in a new thread"""
@@ -343,7 +372,7 @@ class TaskManager:
         if not url:
             return
         elif self.has_task(url):
-            messagebox.showerror(title="You Get Error",
+            messagebox.showerror(title="You-Get Error",
                     message="Task for the URL: {} already exists".format(url))
             return
 
@@ -355,6 +384,14 @@ class TaskManager:
         self.task_waiting_queue.append(atask)
         self.update_task_queue()
 
+    def queue_task(self, atask):
+        if isinstance(atask, str):
+             atask = self.get_task(atask)
+        if not atask: return
+        if atask.success < 0:
+            atask.success = 0
+        self.task_waiting_queue.append(atask)
+
     def update_task_queue(self):
         new_run = []
         for atask in self.task_running_queue:
@@ -363,7 +400,7 @@ class TaskManager:
             else:
                 atask.save_db(self.app.database)
                 # requeue on failed
-                if -3 < atask.success < 0:
+                if -self.max_retry < atask.success < 0:
                     self.task_waiting_queue.append(atask)
         self.task_running_queue = new_run
 
@@ -387,6 +424,11 @@ class TaskManager:
     def get_tasks(self):
         """Get all the tasks"""
         ret = self.tasks.items()
+        return ret
+
+    def get_task(self, origin):
+        """Get a task"""
+        ret = self.tasks.get(origin, None)
         return ret
 
     def get_success_tasks(self):
@@ -420,29 +462,39 @@ class AddTaskDialog(simpledialog.Dialog):
     def body(self, master):
         ttk.Label(master, text="URL:").grid(row=0, sticky="e")
         ttk.Label(master, text="Dir:").grid(row=1, sticky="e")
-        ttk.Label(master, text="Unblock Youku:").grid(row=2, sticky="e")
+        ttk.Label(master, text="Extractor Proxy:").grid(row=2, sticky="e")
 
 
         self.e1 = ttk.Entry(master, width=80, exportselection=False)
         self.e2 = ttk.Entry(master, width=80)
+        self.e3 = ttk.Entry(master, width=80)
 
-        self.unblock_uku_var = tkinter.IntVar()
-        self.c1 = ttk.Checkbutton(master, variable=self.unblock_uku_var)
+        self.use_xproxy_var = tkinter.IntVar()
+        self.use_xproxy_var.trace("w", self.on_use_xproxy_changed)
+        self.c1 = ttk.Checkbutton(master, variable=self.use_xproxy_var)
 
+        padx = 6
+        pady = 4
         self.e1.grid(row=0, column=1)
         self.e2.grid(row=1, column=1)
-        self.c1.grid(row=2, column=1, sticky="w")
+        self.e3.grid(row=2, column=1)
+        self.c1.grid(row=2, column=2, padx=padx, pady=pady, sticky="w")
 
         self.b1 = ttk.Button(master, text="Browse", underline="0",
                 command=self.on_browse_directory)
-        self.b1.grid(row=1, column=2, padx=6, pady=4)
+        self.b1.grid(row=1, column=2, padx=padx, pady=pady)
         self.bind("<Control-b>", self.on_browse_directory)
 
         # default settings
-        if self.settings.get("output_dir"):
+        if self.settings.get("output_dir", None):
             self.set_path(self.settings["output_dir"])
-        if self.settings.get("extractor_proxy") == "unblock-youku":
-            self.unblock_uku_var.set(1)
+        if self.settings.get("extractor_proxy", None):
+            self.e3.delete(0, "end")
+            self.e3.insert(0, self.settings["extractor_proxy"])
+        if self.settings.get("use_extractor_proxy", False):
+            self.use_xproxy_var.set(True)
+        else:
+            self.use_xproxy_var.set(False)
 
         # init URL entry with clipboard content
         try:
@@ -452,17 +504,23 @@ class AddTaskDialog(simpledialog.Dialog):
                 self.e1.insert(0, clip_text)
                 self.e1.select_range(0, "end")
         except tkinter.TclError:
-            # nothing in selection
+            # nothing in clipboard/selection
             pass
 
         self.result = None
         return self.e1 # initial focus
 
+    def on_use_xproxy_changed(self, *args):
+        if self.use_xproxy_var.get():
+            self.e3.configure(state="normal")
+        else:
+            self.e3.configure(state="disabled")
+
     def on_browse_directory(self, *args):
         """Get directory by GUI"""
         current_dir = self.e2.get()
         output_dir = filedialog.askdirectory(initialdir=current_dir,
-                title="You Get Output Directory")
+                title="You-Get Output Directory")
         if output_dir:
             self.set_path(output_dir)
 
@@ -475,11 +533,13 @@ class AddTaskDialog(simpledialog.Dialog):
     def apply(self):
         url = self.e1.get()
         output_dir = self.e2.get()
-        do_unblock_uku = self.unblock_uku_var.get()
+        extractor_proxy = self.e3.get()
+        use_xproxy = True if self.use_xproxy_var.get() else False
         info = {
                 "url": url,
                 "output_dir": output_dir,
-                "extractor_proxy": "unblock-youku" if do_unblock_uku else "",
+                "extractor_proxy": extractor_proxy,
+                "use_extractor_proxy": use_xproxy,
                 }
         self.result = info
         #print (info) # or something
@@ -619,24 +679,37 @@ class App(ttk.Frame):
     def setup_menu(self):
         menu_bar = tkinter.Menu(self.parent)
         self.parent.config(menu=menu_bar)
-        file_menu = tkinter.Menu(menu_bar, tearoff=False)
 
+        # File menu
+        file_menu = tkinter.Menu(menu_bar, tearoff=False)
         file_menu.add_command(label="New...", underline=0,
                 accelerator="Ctrl+N", command=self.on_new_download)
-        file_menu.add_command(label="Clear Successed", underline=1,
-                command=self.clear_successed_task)
-        file_menu.add_command(label="Clear Failed",
-                command=self.clear_failed_task)
+        """
         submenu = tkinter.Menu(file_menu, tearoff=False)
         submenu.add_command(label="New feed")
         submenu.add_command(label="Bookmarks")
         submenu.add_command(label="Mail")
-        #file_menu.add_cascade(label='Import', menu=submenu, underline=0)
+        file_menu.add_cascade(label='Import', menu=submenu, underline=0)
+        """
         file_menu.add_separator()
         file_menu.add_command(label="Quit", underline=0,
                 accelerator="Ctrl+Q", command=self.stop)
 
         menu_bar.add_cascade(label="File", underline=0, menu=file_menu)
+
+        # Task menu
+        task_menu = tkinter.Menu(menu_bar, tearoff=False)
+        task_menu.add_command(label="Re-Start", underline=0,
+                command=self.restart_selected_task)
+        task_menu.add_command(label="Remove", underline=1,
+                command=self.remove_selected_task)
+        task_menu.add_separator()
+        task_menu.add_command(label="Clear Successed", underline=7,
+                command=self.clear_successed_task)
+        task_menu.add_command(label="Clear Failed", underline=7,
+                command=self.clear_failed_task)
+        menu_bar.add_cascade(label="Task", underline=0, menu=task_menu)
+
         self.bind_all("<Control-q>", self.stop)
         self.bind_all("<Control-n>", self.on_new_download)
 
@@ -649,6 +722,7 @@ class App(ttk.Frame):
                 if hasattr(atask, key):
                     setattr(atask, key, row[key])
 
+            #for k in row.keys(): print(row[k])
             if atask.success < 1:
                 atask.success = 0 # reset counter
                 self.task_manager.task_waiting_queue.append(atask)
@@ -677,7 +751,7 @@ class App(ttk.Frame):
 
     Format: {stream_id:}
   Playlist: {do_playlist:}
-    XProxy: {extractor_proxy:}
+    XProxy: {extractor_proxy:} [{use_extractor_proxy:}]
     Origin: {origin:}
 """.format(**data)
 
@@ -688,12 +762,31 @@ class App(ttk.Frame):
 
     def on_new_download(self, *args):
         """event handler for new download"""
-        dialog = AddTaskDialog(self.parent, "New Download", self.settings)
+        dialog = AddTaskDialog(self.parent, "You-Get New Download",
+                self.settings)
         info = dialog.result
         if info:
             if info["url"].startswith("http"):
                 self.settings.update(info)
                 self.task_manager.start_download(info)
+
+    def restart_selected_task(self, *args):
+        origins = self.tree_task.selection()
+        if not origins: return
+        for o in origins:
+            atask = self.task_manager.get_task(o)
+            if atask.success < 0:
+                atask.success = 0
+            self.task_manager.queue_task(atask)
+        self.task_manager.update_task_queue()
+
+    def remove_selected_task(self, *args):
+        origins = self.tree_task.selection()
+        if not origins: return
+        for o in origins:
+            self.tree_task.delete(o)
+            self.task_manager.remove_task(o)
+        self.database.delete_task(origins)
 
     def clear_successed_task(self, *args):
         tasks = self.task_manager.get_success_tasks()
@@ -727,40 +820,6 @@ class App(ttk.Frame):
         cols[3] = atask.origin
         tree.insert("", index, iid=atask.origin, values=cols, tags=[tag])
 
-    def check_log(self):
-        color_codes = {
-                1:  "bold",
-                4:  "underline",
-                31: "red",
-                32: "green",
-                33: "yellow",
-                34: "blue",
-                }
-        lqueue = self.log_queue
-        self.text_log.configure(state="normal")
-        empty = lqueue.empty()
-        try:
-            for i in range(LOG_QUEUE_SIZE):
-                text, colors = lqueue.get(block=False)
-                tags = tuple([y for x, y in color_codes.items() if x in colors])
-                if len(tags) == 0:
-                    tags = None
-                self.text_log.insert("insert", text+"\n", tags)
-        except queue.Empty:
-            pass
-
-        # keep upper limit of log lines
-        if not empty:
-            max_log = MAX_LOG_LINES
-            delta = 0 # some extra lines to tolerant
-            lindex = self.text_log.index("end")
-            line_no, s, w = lindex.partition(".")
-            line_no = int(line_no) - 1
-            if line_no > max_log + delta :
-                cut_off = line_no - max_log
-                self.text_log.delete("1.0", "{}.0".format(cut_off))
-        self.text_log.configure(state="disabled")
-
     def update_task(self):
         """Update task status periodically"""
         tree = self.tree_task
@@ -784,6 +843,11 @@ class App(ttk.Frame):
                 total_size = num2human(atask.get_total())
                 total_size = "{}B".format(total_size)
 
+                if atask.success < 0: # reset tag
+                    tags = tree.item(origin)
+                    if "failed" in tags:
+                        tree.item(origin, tags=["live"])
+
                 tree.set(origin, 0, atask.title)
                 tree.set(origin, 1, total_size )
                 tree.set(origin, 2, percent)
@@ -793,6 +857,33 @@ class App(ttk.Frame):
 
         self.parent.after(1000, self.update_task) # in ms
 
+    def check_log(self):
+        lqueue = self.log_queue
+        self.text_log.configure(state="normal")
+        empty = lqueue.empty()
+        try:
+            for i in range(LOG_QUEUE_SIZE):
+                text, colors = lqueue.get(block=False)
+                tags = tuple([y for x, y in LOG_COLOR_CODES.items()
+                    if x in colors])
+                if len(tags) == 0:
+                    tags = None
+                self.text_log.insert("insert", text+"\n", tags)
+        except queue.Empty:
+            pass
+
+        # keep upper limit of log lines
+        if not empty:
+            max_log = MAX_LOG_LINES
+            delta = 0 # some extra lines to tolerant
+            lindex = self.text_log.index("end")
+            line_no, s, w = lindex.partition(".")
+            line_no = int(line_no) - 1
+            if line_no > max_log + delta :
+                cut_off = line_no - max_log
+                self.text_log.delete("1.0", "{}.0".format(cut_off))
+        self.text_log.configure(state="disabled")
+
     def load_config(self):
         if not self.database:
             self.database = YouGetDB()
@@ -801,8 +892,9 @@ class App(ttk.Frame):
         #for k, v in config.items(): log.debug("{}: {} {}".format(k,type(v),v))
         for k, v in config.items():
             if k.startswith("settings_"):
-                k, _, _2 = k.partition("_")
+                prefix, _, k = k.partition("_")
                 self.settings[k] = v
+
         if "geometry" in config:
             size, s, pos = config["geometry"].partition("+")
             if not s:
@@ -821,7 +913,7 @@ class App(ttk.Frame):
                 "sashpos": self.paned_window.sashpos(0)
                 }
         for k, v in self.settings.items():
-            if k in {"url",}: continue
+            if k in {"url", "do_playlist"}: continue
             config["settings_" + k] = v
         self.database.save_config(config)
 
