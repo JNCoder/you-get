@@ -261,6 +261,8 @@ class Task:
         self.thread = None
         self.total_size = 0
         self.received = 0 # keep a record of progress changes
+        self.speed = 0
+        self.last_update_time = -1
         self.finished = False
         self.success = 0
         self.need_save = False
@@ -285,7 +287,22 @@ class Task:
 
     def update(self):
         if self.progress_bar:
-            self.received = self.progress_bar.received
+            now = time.time()
+            received = self.progress_bar.received
+            received_last = self.received
+
+            # calc speed
+            then = self.last_update_time
+            if then > 0:
+                if received > received_last:
+                    self.speed = float(received - received_last)/(now - then)
+                elif self.speed != 0:
+                    self.speed = 0
+            self.last_update_time = now
+
+            if received_last != received:
+                self.received = received
+
         return self.received
 
     def percent_done(self):
@@ -303,6 +320,8 @@ class Task:
         if self.title is None: # keep the first filename as title
             self.title = os.path.basename(filepath)
         self.progress_bar = bar
+        self.update()
+
         self.set_need_save(True)
         if self.do_playlist and filepath not in self.playlist:
             f = os.path.basename(filepath)
@@ -580,6 +599,16 @@ class MonkeyFriend:
         lqueue = self.app.log_queue
         lqueue.put((text, colors))
 
+class ColumnIndex:
+    """A class holding map of column label to index"""
+    def __init__(self, cols):
+        for i, k in enumerate(cols):
+            setattr(self, k, i)
+        self._len = len(cols)
+
+    def __len__(self):
+        return self._len
+
 class App(ttk.Frame):
     def __init__(self, parent):
         global taskManager
@@ -604,7 +633,9 @@ class App(ttk.Frame):
         frame_tree = self.frame_tree = ttk.Frame(paned_window)
 
         # task treeview
-        columns=("file", "size", "progress", "origin")
+        columns=("file", "size", "speed", "progress", "origin")
+        self.tree_cols = ColumnIndex(columns)
+
         tree_task = self.tree_task = ttk.Treeview(frame_tree,
                 show="headings", columns=columns, displaycolumns=columns[:-1])
         tree_task.tag_configure("done",
@@ -625,7 +656,10 @@ class App(ttk.Frame):
         num_column_width = 60
         tree_task.column("size", stretch=False, width=num_column_width,
                 anchor="e")
-        tree_task.column("progress", stretch=False, width=num_column_width)
+        tree_task.column("speed", stretch=False, width=num_column_width,
+                anchor="e")
+        tree_task.column("progress", stretch=False, width=num_column_width,
+                anchor="e")
         tree_task.bind("<<TreeviewSelect>>", self.on_treeview_select_changed)
 
         tree_task.grid(row=0, column=0, sticky="news")
@@ -850,22 +884,24 @@ class App(ttk.Frame):
 
     def attach_download_task(self, atask, index="end"):
         tree = self.tree_task
-        cols = ["-"]*4
+        tc = self.tree_cols
+        cols = ["-"]*len(tc)
         tag = "live"
         if atask.title:
-            cols[0] = atask.title
-        cols[1] = "{}B".format(num2human(atask.get_total()))
+            cols[tc.file] = atask.title
+        cols[tc.size] = "{}B".format(num2human(atask.get_total()))
         if atask.success > 0:
-            cols[2] = "Done"
+            cols[tc.progress] = "Done"
             tag = "done"
             atask.finished = True
         else:
-            cols[2] = "{:.2f}%".format(atask.percent_done())
-        cols[3] = atask.origin
+            cols[tc.progress] = "{:.2f}%".format(atask.percent_done())
+        cols[tc.origin] = atask.origin
         tree.insert("", index, iid=atask.origin, values=cols, tags=[tag])
 
     def update_task(self):
         """Update task status"""
+        tc = self.tree_cols
         tree = self.tree_task
         items = self.task_manager.get_tasks()
         for origin, atask in items:
@@ -874,27 +910,40 @@ class App(ttk.Frame):
             if atask.thread is None or atask.finished == True:
                 continue
             elif not atask.thread.is_alive():
+                atask.update()
                 if atask.success > 0:
                     tree.item(origin, tags=["done"])
-                    tree.set(origin, 2, "Done")
+                    tree.set(origin, tc.progress, "Done")
                 else:
                     tree.item(origin, tags=["failed"])
-                    tree.set(origin, 2, "Failed {}".format(-atask.success))
+                    tree.set(origin, tc.progress,
+                            "Failed {}".format(-atask.success))
+                # one last update
+                total_size = num2human(atask.get_total())
+                total_size = "{}B".format(total_size)
+                speed = "-"
+
+                tree.set(origin, tc.file, atask.title)
+                tree.set(origin, tc.size, total_size )
+                tree.set(origin, tc.speed, speed)
+
                 atask.finished = True
             elif atask.changed():
                 atask.update()
                 percent = "{:.2f}%".format(atask.percent_done())
                 total_size = num2human(atask.get_total())
                 total_size = "{}B".format(total_size)
+                speed = "{}B/s".format( num2human(atask.speed) )
 
-                if atask.success < 0: # reset tag
+                if atask.success != 0: # reset tag
                     tags = tree.item(origin)
-                    if "failed" in tags:
+                    if "failed" in tags or "done" in tags:
                         tree.item(origin, tags=["live"])
 
-                tree.set(origin, 0, atask.title)
-                tree.set(origin, 1, total_size )
-                tree.set(origin, 2, percent)
+                tree.set(origin, tc.file, atask.title)
+                tree.set(origin, tc.size, total_size )
+                tree.set(origin, tc.speed, speed)
+                tree.set(origin, tc.progress, percent)
 
         self.task_manager.update_task_queue()
 
