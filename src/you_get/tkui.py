@@ -270,7 +270,8 @@ class Task:
         if self.do_playlist:
             self.playlist = set()
 
-        self.lock = threading.Lock()
+        self.save_lock = threading.Lock()
+        self.update_lock = threading.Lock()
 
     def get_total(self):
         ret = self.total_size
@@ -287,21 +288,23 @@ class Task:
 
     def update(self):
         if self.progress_bar:
+            self.update_lock.acquire()
             now = time.time()
             received = self.progress_bar.received
             received_last = self.received
+            then = self.last_update_time
 
             # calc speed
-            then = self.last_update_time
             if then > 0:
                 if received > received_last:
                     self.speed = float(received - received_last)/(now - then)
                 elif self.speed != 0:
                     self.speed = 0
-            self.last_update_time = now
 
+            self.last_update_time = now
             if received_last != received:
                 self.received = received
+            self.update_lock.release()
 
         return self.received
 
@@ -328,11 +331,12 @@ class Task:
             self.playlist.add(f)
 
     def set_need_save(self, value):
-        self.lock.acquire()
+        self.save_lock.acquire()
         self.need_save = value
-        self.lock.release()
+        self.save_lock.release()
 
     def save_db(self, db):
+        self.update()
         current_data = self.get_database_data()
         old_data = db.get_task_values(self.origin)
         new_info = {}
@@ -650,15 +654,18 @@ class App(ttk.Frame):
                 command=tree_task.yview)
         tree_task.configure(xscrollcommand=hsb.set, yscrollcommand=vsb.set)
 
-        for t in columns:
+        for t in ["file"]:
             tree_task.heading(t, text=t.title(), anchor="w")
+        for t in ["size", "speed", "progress"]:
+            tree_task.heading(t, text=t.title(), anchor="e")
 
         num_column_width = 60
+        speed_column_width = int(num_column_width * 5/4)
         tree_task.column("size", stretch=False, width=num_column_width,
                 anchor="e")
-        tree_task.column("speed", stretch=False, width=num_column_width,
-                anchor="e")
         tree_task.column("progress", stretch=False, width=num_column_width,
+                anchor="e")
+        tree_task.column("speed", stretch=False, width=speed_column_width,
                 anchor="e")
         tree_task.bind("<<TreeviewSelect>>", self.on_treeview_select_changed)
 
@@ -898,6 +905,7 @@ class App(ttk.Frame):
             cols[tc.progress] = "{:.2f}%".format(atask.percent_done())
         cols[tc.origin] = atask.origin
         tree.insert("", index, iid=atask.origin, values=cols, tags=[tag])
+        tree.see(atask.origin)
 
     def update_task(self):
         """Update task status"""
