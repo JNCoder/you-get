@@ -3,12 +3,38 @@
 """
 Monkey patch modules to make them thread aware.
 
-Since `urllib` is not thread safe, .common will not be
+Since `urllib` is not thread safe, .common might not be
 thread safe before and after monkey patched.
+
+Example:
+    import thread_monkey_patch
+    class MonkeyFriend(thread_monkey_patch.UIFriend):
+        def __init__(self, app):
+            self.app = app
+        def sprint(self, text, *color):
+            self.app.print_log(text, *color)
+
+    class MyTask(thread_monkey_patch.TaskBase):
+        def __init__(self, app):
+            self.app = app
+
+        def target(self, *args, **kwargs):
+            self.app.do_my_work(*args, **kwargs)
+
+        def update_task_status(self, urls=None, title=None,
+                file_path=None, progress_bar=None):
+            self.app.update_something(blah, blah__)
+
+    main_app = MyApp()
+    monkey_friend = MonkeyFriend(main_app)
+
+    thread_monkey_patch.monkey_patch_all(monkey_friend)
+
 """
 
 import sys
 import os
+import time
 import threading
 
 from . import common
@@ -19,6 +45,61 @@ import socket
 
 Origins = {} # kept original functions
 UI_Monkey = None
+
+class UIFriend:
+    """Interface for UI object for the UI_Monkey
+    Override methods to acquire corresponding functionality in UI_Monkey
+    """
+    def sprint(self, text, *colors):
+        return text
+
+class TaskBase:
+    """Interface to dowload thread task
+    normally, the following methods need to be override:
+
+        def update_task_status(self, urls=None, title=None,
+                file_path=None, progress_bar=None):
+            pass
+
+        def target(self, *args, **kwargs):
+            pass
+    """
+    def update_task_status(self, urls=None, title=None,
+            file_path=None, progress_bar=None):
+        """Called by the download_urls function in a download thread
+        Setup download status of the given task
+        """
+        pass
+
+    def target(self, *args, **kwargs):
+        """Target to run by the task thread in start() call"""
+        pass
+
+    def pre_thread_start(self, athread):
+        """Called before a thread is created but not start"""
+        pass
+
+    def post_thread_start(self, athread):
+        """Called after a thread is created and started"""
+        pass
+
+    def start(self, thread_target=None, *args, **kwargs):
+        """start task"""
+        if thread_target is None:
+            thread_target = self.target
+
+        t = threading.Thread(target=thread_target,
+                args=args, kwargs=kwargs)
+
+        self.thread = t
+        t.download_task = self
+        t.daemon = True
+
+        self.pre_thread_start(t)
+        t.start()
+        self.post_thread_start(t)
+
+        time.sleep(0.1)
 
 def install_ui_monkey(ui_obj):
     """Supply a GUI object to UIMonkey"""
@@ -33,7 +114,12 @@ Thread_Local = MyLocal()
 
 # common.py
 def thread_download_urls(urls, title, ext, total_size, output_dir='.', refer=None, merge=True, faker=False):
-    """download_urls() which register progress bar to taskManager"""
+    """download_urls() which register progress bar to taskManager
+    A `download_task` attribute was attached to the current thread object.
+    Download information should be passed through the
+    `download_task.update_task_status()` method.
+
+    """
     assert urls
     force=False
 
@@ -56,7 +142,8 @@ def thread_download_urls(urls, title, ext, total_size, output_dir='.', refer=Non
     thread_me = threading.current_thread()
     #print("download task of current thread:", thread_me.download_task)
     try:
-        thread_me.download_task.update_task_status(urls, filepath, bar)
+        thread_me.download_task.update_task_status(urls=urls,
+                file_path=filepath, progress_bar=bar)
     except AttributeError:
         pass
 
@@ -137,7 +224,8 @@ def thread_download_urls_chunked(urls, title, ext, total_size, output_dir='.', r
     bar = SimpleProgressBar(total_size, len(urls))
     thread_me = threading.current_thread()
     try:
-        thread_me.download_task.update_task_status(urls, filepath, bar)
+        thread_me.download_task.update_task_status(urls=urls,
+                file_path=filepath, progress_bar=bar)
     except AttributeError:
         pass
 
@@ -299,4 +387,12 @@ def monkey_patch_urllib_request():
 
     request.urlopen = thread_urlopen
     request.install_opener = thread_install_opener
+
+def monkey_patch_all(gui_friend):
+    """monkey patch all the available function"""
+    monkey_patch_urllib_request()
+    monkey_patch_common()
+
+    install_ui_monkey(gui_friend)
+    monkey_patch_log()
 

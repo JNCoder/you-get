@@ -16,6 +16,7 @@ import tkinter.font
 from tkinter import simpledialog, filedialog, messagebox
 from tkinter import ttk
 
+from . import thread_monkey_patch
 from . import common
 from .util import log
 
@@ -240,7 +241,7 @@ def my_download_main(download, download_playlist, urls, playlist, **kwargs):
         else:
             kwargs["task"].success = ret
 
-class Task:
+class Task(thread_monkey_patch.TaskBase):
     """Represent a single download task"""
     def __init__(self, url=None, do_playlist=False, output_dir=".",
             merge=True, extractor_proxy=None, use_extractor_proxy=False,
@@ -315,20 +316,31 @@ class Task:
         percent = float(self.received * 100)/total
         return percent
 
-    def update_task_status(self, urls, filepath, bar):
+    def update_task_status(self, urls=None, title=None,
+            file_path=None, progress_bar=None):
         """Called by the download_urls function to setup download status
         of the given task"""
-        self.real_urls = urls
-        self.filepath = filepath
-        if self.title is None: # keep the first filename as title
-            self.title = os.path.basename(filepath)
-        self.progress_bar = bar
-        self.update()
+        if urls is not None:
+            self.real_urls = urls
+
+        if self.title is None: # setup title only once
+            if title is None and file_path is not None:
+                title = os.path.basename(file_path)
+            if title is not None:
+                self.title = title
+
+        if file_path is not None:
+            if self.filepath is None:
+                self.filepath = file_path
+            if self.do_playlist and file_path not in self.playlist:
+                f = os.path.basename(file_path)
+                self.playlist.add(f)
+
+        if progress_bar is not None:
+            self.progress_bar = progress_bar
+            self.update()
 
         self.set_need_save(True)
-        if self.do_playlist and filepath not in self.playlist:
-            f = os.path.basename(filepath)
-            self.playlist.add(f)
 
     def set_need_save(self, value):
         self.save_lock.acquire()
@@ -372,7 +384,13 @@ class Task:
             data["playlist"] = json.dumps(self.playlist)
         return data
 
-    def start(self):
+    # Override TaskBase() Here
+    def pre_thread_start(self, athread):
+        athread.name = self.origin
+        self.finished = False
+
+    def target(self, *dummy_args, **dummy_kwargs):
+        """Called by the TaskBase start a task thread"""
         args = (common.any_download, common.any_download_playlist,
                 [self.origin], self.do_playlist)
         kwargs = {
@@ -387,15 +405,8 @@ class Task:
         if self.stream_id:
             kwargs["stream_id"] = self.stream_id
 
-        self.finished = False
-        t = threading.Thread(target=my_download_main,
-                args=args, kwargs=kwargs)
-        self.thread = t
-        t.download_task = self
-        t.daemon = True
-        t.name = self.origin # try to save origin URL of the download
-        t.start()
-        time.sleep(0.1)
+        my_download_main(*args, **kwargs)
+        return args, kwargs
 
 class TaskManager:
     def __init__(self, app):
@@ -594,7 +605,7 @@ class AddTaskDialog(simpledialog.Dialog):
         #print (info) # or something
 
 #d = AddTaskDialog(tkinter.Tk())
-class MonkeyFriend:
+class MonkeyFriend(thread_monkey_patch.UIFriend):
     """UI object for the thread_monkey_patch.UI_Monkey"""
     def __init__(self, app):
         self.app = app
@@ -659,8 +670,8 @@ class App(ttk.Frame):
         for t in ["size", "speed", "progress"]:
             tree_task.heading(t, text=t.title(), anchor="e")
 
-        num_column_width = 60
-        speed_column_width = int(num_column_width * 5/4)
+        num_column_width = 65
+        speed_column_width = int(num_column_width * 6/5)
         tree_task.column("size", stretch=False, width=num_column_width,
                 anchor="e")
         tree_task.column("progress", stretch=False, width=num_column_width,
@@ -952,10 +963,17 @@ class App(ttk.Frame):
                 tree.set(origin, tc.size, total_size )
                 tree.set(origin, tc.speed, speed)
                 tree.set(origin, tc.progress, percent)
+            else:
+                # nothing changed
+                speed = tree.set(origin, tc.speed)
+                speed_0 = "0B/s"
+                if speed not in {speed_0, "-"}:
+                    tree.set(origin, tc.speed, speed_0)
 
         self.task_manager.update_task_queue()
 
     def check_log(self):
+        """Check log_queue and output log messages"""
         lqueue = self.log_queue
         self.text_log.configure(state="normal")
         empty = lqueue.empty()
@@ -1051,7 +1069,6 @@ def main(**kwargs):
             if not obj.encoding: setattr(sys,  x, codecs.getwriter(enc)(obj))
     set_stdio_encoding()
 
-    from . import thread_monkey_patch
     thread_monkey_patch.monkey_patch_urllib_request()
     thread_monkey_patch.monkey_patch_common()
 
