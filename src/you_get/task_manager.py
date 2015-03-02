@@ -484,6 +484,31 @@ class TaskManager:
         if task in self.task_waiting_queue:
             self.task_waiting_queue.remove(task)
 
+    def load_tasks_from_database(self):
+        database = self.app.database
+        tasks = database.get_task_list()
+        task_objs = []
+        for row in tasks:
+            #print(dict(zip(row.keys(), list(row))))#; sys.exit()
+            try:
+                atask = self.new_task(url=row["origin"])
+                for key in row.keys():
+                    if hasattr(atask, key):
+                        setattr(atask, key, row[key])
+                playlist = json.loads(row["playlist"])
+                if atask.do_playlist:
+                    playlist = set(playlist)
+                atask.playlist = playlist
+
+                #for k in row.keys(): print(row[k])
+                if atask.success < 1:
+                    self.queue_task(atask)
+
+                task_objs.append(atask)
+            except TaskError as e:
+                log.w(str(e))
+        return task_objs
+
 def main():
     def set_stdio_encoding(enc=NATIVE):
         import codecs; stdio = ["stdin", "stdout", "stderr"]

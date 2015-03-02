@@ -348,25 +348,9 @@ class App(ttk.Frame):
         self.bind_all("<Control-n>", self.on_new_download)
 
     def load_tasks_from_database(self):
-        tasks = self.database.get_task_list()
-        for row in tasks:
-            #print(dict(zip(row.keys(), list(row))))#; sys.exit()
-            try:
-                atask = self.task_manager.new_task(url=row["origin"])
-                for key in row.keys():
-                    if hasattr(atask, key):
-                        setattr(atask, key, row[key])
-                playlist = json.loads(row["playlist"])
-                if atask.do_playlist:
-                    playlist = set(playlist)
-                atask.playlist = playlist
-
-                #for k in row.keys(): print(row[k])
-                if atask.success < 1:
-                    self.task_manager.queue_task(atask)
-                self.attach_download_task(atask)
-            except task_manager.TaskError as e:
-                log.w(str(e))
+        tasks = self.task_manager.load_tasks_from_database()
+        for atask in tasks:
+            self.attach_download_task(atask)
 
     def on_treeview_select_changed(self, evt):
         tree = self.tree_task
