@@ -370,7 +370,7 @@ class TaskManager:
     Need to monkey_patch some functions to work. See thread_monkey_patch"""
     def __init__(self, app):
         self.app = app
-        self.tasks = {}
+        self.tasks = collections.OrderedDict()
         self.task_running_queue = []
         self.task_waiting_queue = collections.deque()
         self.max_task = 5
