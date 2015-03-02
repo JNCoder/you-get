@@ -36,16 +36,20 @@ import sys
 import os
 import abc
 import time
+import socket
 import threading
+import urllib.request as request
 
 from . import common
 from .common import tr, urls_size, get_filename, url_save, url_save_chunked
 
-import urllib.request as request
-import socket
-
 Origins = {} # kept original functions
 UI_Monkey = None
+
+class MyLocal(threading.local):
+    """Thread local specific "global" variable"""
+    url_opener = None
+Thread_Local = MyLocal()
 
 class UIFriend:
     """Interface for UI object used by the UI_Monkey class.
@@ -113,11 +117,6 @@ def install_ui_monkey(ui_obj):
     global UI_Monkey
     if UI_Monkey is None:
         UI_Monkey = UIMonkey(ui_obj)
-
-
-class MyLocal(threading.local):
-    url_opener = None
-Thread_Local = MyLocal()
 
 # common.py
 def thread_download_urls(urls, title, ext, total_size, output_dir='.', refer=None, merge=True, faker=False):
@@ -359,6 +358,7 @@ def monkey_patch_log():
 # urllib.request
 def thread_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
             *, cafile=None, capath=None, cadefault=False):
+    """Patch urllib.request.urlopen"""
     build_opener = request.build_opener
     _have_ssl = request._have_ssl
     if _have_ssl:
@@ -385,10 +385,11 @@ def thread_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
     return opener.open(url, data, timeout)
 
 def thread_install_opener(opener):
+    """Patch urllib.request.install_opener"""
     Thread_Local.url_opener = opener
 
 def monkey_patch_urllib_request():
-    """Replace try to make urllib.request robust by avoiding global `_opener`"""
+    """Try to make urllib.request robust by avoiding global `_opener`"""
     m = {}
     m["urlopen"] = request.urlopen
     m["install_opener"] = request.install_opener
@@ -398,7 +399,7 @@ def monkey_patch_urllib_request():
     request.install_opener = thread_install_opener
 
 def monkey_patch_all(gui_friend):
-    """monkey patch all the available function"""
+    """monkey patch all the patchable functions"""
     monkey_patch_urllib_request()
     monkey_patch_common()
 
