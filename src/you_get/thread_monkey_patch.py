@@ -34,6 +34,7 @@ Example:
 
 import sys
 import os
+import abc
 import time
 import threading
 
@@ -47,9 +48,11 @@ Origins = {} # kept original functions
 UI_Monkey = None
 
 class UIFriend:
-    """Interface for UI object for the UI_Monkey
+    """Interface for UI object used by the UI_Monkey class.
     Override methods to acquire corresponding functionality in UI_Monkey
     """
+    __metaclass__ = abc.ABCMeta
+
     def sprint(self, text, *colors):
         return text
 
@@ -64,6 +67,9 @@ class TaskBase:
         def target(self, *args, **kwargs):
             pass
     """
+    __metaclass__ = abc.ABCMeta
+
+    @abc.abstractmethod
     def update_task_status(self, urls=None, title=None,
             file_path=None, progress_bar=None):
         """Called by the download_urls function in a download thread
@@ -71,8 +77,9 @@ class TaskBase:
         """
         pass
 
+    @abc.abstractmethod
     def target(self, *args, **kwargs):
-        """Target to run by the task thread in start() call"""
+        """Target to run by the task thread in start() method"""
         pass
 
     def pre_thread_start(self, athread):
@@ -84,7 +91,7 @@ class TaskBase:
         pass
 
     def start(self, thread_target=None, *args, **kwargs):
-        """start task"""
+        """call this method to start the task"""
         if thread_target is None:
             thread_target = self.target
 
@@ -326,6 +333,8 @@ def monkey_patch_common():
 class UIMonkey:
     """Monkey patch functions with an UI object"""
     def __init__(self, ui_obj):
+        if not isinstance(ui_obj, UIFriend):
+            raise(TypeError, "parameter ui_obj is not a instance of UIFriend")
         self.ui_obj = ui_obj
 
     def sprint(self, text, *colors):
