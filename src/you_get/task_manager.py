@@ -478,13 +478,19 @@ class TaskManager:
                 ret.append(atask)
         return ret
 
-    def remove_task(self, origin):
-        task = self.tasks[origin]
-        del self.tasks[origin]
-        if task in self.task_waiting_queue:
-            self.task_waiting_queue.remove(task)
+    def remove_tasks(self, origins):
+        """Remove tasks from TaskManager and Database"""
+        if isinstance(origins, str):
+            origins = [origins]
+        for origin in origins:
+            task = self.tasks[origin]
+            del self.tasks[origin]
+            if task in self.task_waiting_queue:
+                self.task_waiting_queue.remove(task)
+        self.app.database.delete_task(origins)
 
     def load_tasks_from_database(self):
+        """Load saved tasks to TaskManager from database"""
         database = self.app.database
         tasks = database.get_task_list()
         task_objs = []

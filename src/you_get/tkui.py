@@ -421,28 +421,26 @@ class App(ttk.Frame):
             self.task_manager.queue_task(atask)
         self.task_manager.update_task_queue()
 
+    def remove_tasks(self, origins):
+        """remove tasks with the given origins"""
+        for o in origins:
+            self.tree_task.delete(o)
+        self.task_manager.remove_tasks(origins)
+
     def remove_selected_task(self, *args):
         origins = self.tree_task.selection()
         if not origins: return
-        for o in origins:
-            self.tree_task.delete(o)
-            self.task_manager.remove_task(o)
+        self.remove_tasks(origins)
 
     def clear_successed_task(self, *args):
         tasks = self.task_manager.get_success_tasks()
         origins = [x.origin for x in tasks]
-        for o in origins:
-            self.tree_task.delete(o)
-            self.task_manager.remove_task(o)
-        self.database.delete_task(origins)
+        self.remove_tasks(origins)
 
     def clear_failed_task(self, *args):
         tasks = self.task_manager.get_failed_tasks()
         origins = [x.origin for x in tasks]
-        for o in origins:
-            self.tree_task.delete(o)
-            self.task_manager.remove_task(o)
-        self.database.delete_task(origins)
+        self.remove_tasks(origins)
 
     def attach_download_task(self, atask, index="end"):
         """Attach a download task to the treeview"""
