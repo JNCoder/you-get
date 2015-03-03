@@ -384,6 +384,14 @@ def thread_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
     #print("my-opener", opener)
     return opener.open(url, data, timeout)
 
+def thread_build_opener(*args):
+    """Add cookiejar if available to any opener"""
+    if common.cookies_txt is not None:
+        cookie_handler = request.HTTPCookieProcessor(common.cookies_txt)
+        args = args + (cookie_handler,)
+    ret = Origins["urllib.request"]["build_opener"](*args)
+    return ret
+
 def thread_install_opener(opener):
     """Patch urllib.request.install_opener"""
     Thread_Local.url_opener = opener
@@ -392,10 +400,12 @@ def monkey_patch_urllib_request():
     """Try to make urllib.request robust by avoiding global `_opener`"""
     m = {}
     m["urlopen"] = request.urlopen
+    m["build_opener"] = request.build_opener
     m["install_opener"] = request.install_opener
-    Origins["common"] = m
+    Origins["urllib.request"] = m
 
     request.urlopen = thread_urlopen
+    request.build_opener = thread_build_opener
     request.install_opener = thread_install_opener
 
 def monkey_patch_all(gui_friend):

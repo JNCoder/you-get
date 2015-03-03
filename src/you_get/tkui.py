@@ -14,6 +14,7 @@ from tkinter import ttk
 
 from . import thread_monkey_patch
 from . import task_manager
+from . import common
 from .util import log
 
 APPNAME = "you-get"
@@ -180,19 +181,24 @@ class ColumnIndex:
 class App(ttk.Frame):
     """main application"""
     db_fname = "you-get-tk.sqlite"
+    cookie_fname = "you-get-tk-cookies.txt"
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
+        self.cookie_jar = None
+
         self.task_manager = task_manager.TaskManager(self)
         self.data_folder = task_manager.setup_data_folder(APPNAME)
         log.i("Data Folder: {}".format(self.data_folder))
         self.database = task_manager.YouGetDB(self.db_fname, self.data_folder)
         self.log_queue = queue.Queue(LOG_QUEUE_SIZE)
+
         self.setup_ui()
         self.settings = {
                 "output_dir": os.path.abspath("."),
                 }
         self.load_config()
+        self.setup_cookiejar()
         self.load_tasks_from_database()
 
     def setup_ui(self):
@@ -598,6 +604,19 @@ class App(ttk.Frame):
         self.update_task()
         self.parent.after(timeout, self.periodic_update_5s)
 
+    def setup_cookiejar(self):
+        """setup cookie jar
+        It seems cookiejar use some kind Lock, so assume we are thread safe"""
+        from http import cookiejar
+        cookie_path = os.path.join(self.data_folder, self.cookie_fname)
+        cookies_txt = cookiejar.MozillaCookieJar(cookie_path)
+        try:
+            cookies_txt.load()
+        except OSError:
+            pass # file not found
+        common.cookies_txt = cookies_txt
+        self.cookie_jar = cookies_txt
+
     def start(self):
         self.periodic_update_1s()
         self.periodic_update_5s()
@@ -608,6 +627,7 @@ class App(ttk.Frame):
         self.parent.withdraw() # hide main window immediately
         self.parent.quit()
 
+        self.cookie_jar.save()
         task_items = self.task_manager.get_running_tasks()
         for atask in task_items:
             atask.save_db(self.database)
