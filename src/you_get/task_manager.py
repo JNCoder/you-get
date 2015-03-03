@@ -48,8 +48,8 @@ def sql_convert_playlist(abytes):
     """decode json encode playlist back to Set"""
     playlist = json.loads(abytes.decode("latin1"))
     if playlist is not None:
-        playlist_set = set(playlist)
-    return playlist_set
+        playlist= set(playlist)
+    return playlist
 
 sqlite3.register_converter("JOPTIONS", sql_convert_options)
 sqlite3.register_converter("JPLAYLIST", sql_convert_playlist)
