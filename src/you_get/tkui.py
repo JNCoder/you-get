@@ -186,7 +186,7 @@ class App(ttk.Frame):
         self.task_manager = task_manager.TaskManager(self)
         self.data_folder = task_manager.setup_data_folder(APPNAME)
         log.i("Data Folder: {}".format(self.data_folder))
-        self.database = task_manager.YouGetDB(dirname=self.data_folder)
+        self.database = task_manager.YouGetDB(self.db_fname, self.data_folder)
         self.log_queue = queue.Queue(LOG_QUEUE_SIZE)
         self.setup_ui()
         self.settings = {
@@ -234,6 +234,8 @@ class App(ttk.Frame):
         tree_task.column("speed", stretch=False, width=speed_column_width,
                 anchor="e")
         tree_task.bind("<<TreeviewSelect>>", self.on_treeview_select_changed)
+        tree_task.bind("<Control-r>", self.restart_selected_task)
+        tree_task.bind("<Delete>", self.remove_selected_task)
 
         tree_task.grid(row=0, column=0, sticky="news")
         hsb.grid(row=1, column=0, sticky="ew")
@@ -334,8 +336,10 @@ class App(ttk.Frame):
         # Task menu
         task_menu = tkinter.Menu(menu_bar, tearoff=False)
         task_menu.add_command(label="Re-Start", underline=0,
+                accelerator="Ctrl+R",
                 command=self.restart_selected_task)
         task_menu.add_command(label="Remove", underline=1,
+                accelerator="Del",
                 command=self.remove_selected_task)
         task_menu.add_separator()
         task_menu.add_command(label="Clear Successed", underline=7,
@@ -361,9 +365,10 @@ class App(ttk.Frame):
         data = atask.get_database_data()
         data["total"] = num2human(data["total_size"]) + "B"
         data["received"] = num2human(data["received"]) + "B"
-        data["playlist"] = json.loads(data["playlist"])
 
-        bool_keys = ["use_extractor_proxy", "do_playlist"]
+        data.update(data["options"])
+
+        bool_keys = ["do_playlist", "merge"]
         for k in bool_keys:
             data[k] = "ON" if data[k] else "OFF"
         if data["filepath"]:
@@ -381,7 +386,7 @@ class App(ttk.Frame):
 
     Format: {stream_id:}
   Playlist: {do_playlist:}
-    XProxy: {extractor_proxy:} [{use_extractor_proxy:}]
+    XProxy: {extractor_proxy:}
     Origin: {origin:}
 """.format(**data)
 
@@ -406,6 +411,11 @@ class App(ttk.Frame):
             if info:
                 if info["url"].startswith("http"):
                     self.settings.update(info)
+
+                    # clean up options
+                    if not info["use_extractor_proxy"]:
+                        info["extractor_proxy"] = None
+                    del info["use_extractor_proxy"]
                     self.task_manager.start_download(info)
         except task_manager.TaskError as err:
             msg = str(err)
@@ -544,7 +554,8 @@ class App(ttk.Frame):
 
     def load_config(self):
         if not self.database:
-            self.database = task_manager.YouGetDB(self.db_fname)
+            self.database = task_manager.YouGetDB(self.db_fname,
+                    self.data_folder)
         config = self.database.load_config()
 
         #for k, v in config.items(): log.debug("{}: {} {}".format(k,type(v),v))

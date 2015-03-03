@@ -5,6 +5,7 @@ import os
 import sys
 import time
 import json
+import heapq
 import sqlite3
 import threading
 import collections
@@ -37,6 +38,22 @@ def setup_data_folder(appname):
 class TaskError(Exception):
     pass
 
+# Sqlite3 DataType converter
+def sql_convert_options(abytes):
+    """deocode json encoded option dict"""
+    opt_dict = json.loads(abytes.decode("latin1"))
+    return opt_dict
+
+def sql_convert_playlist(abytes):
+    """decode json encode playlist back to Set"""
+    playlist = json.loads(abytes.decode("latin1"))
+    if playlist is not None:
+        playlist_set = set(playlist)
+    return playlist_set
+
+sqlite3.register_converter("JOPTIONS", sql_convert_options)
+sqlite3.register_converter("JPLAYLIST", sql_convert_playlist)
+
 class YouGetDB:
     """Sqlite database class for program data"""
     def __init__(self, db_fname=None, dirname=None):
@@ -64,7 +81,8 @@ class YouGetDB:
         return version
 
     def setup_database(self):
-        con = self.con = sqlite3.connect(self.path)
+        con = self.con = sqlite3.connect(self.path,
+                detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
         file_version = self.get_version()
 
@@ -73,13 +91,9 @@ class YouGetDB:
         con.execute('''CREATE TABLE if not exists {} (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             origin TEXT UNIQUE,
-            output_dir TEXT,
-            do_playlist BOOLEAN,
-            playlist TEXT,
-            merge BOOLEAN,
-            extractor_proxy TEXT,
-            use_extractor_proxy BOOLEAN,
-            stream_id TEXT,
+            options JOPTIONS,          -- download options in json
+            priority INTEGER,
+            playlist JPLAYLIST,
             title TEXT,
             filepath TEXT,
             success INTEGER,
@@ -117,13 +131,29 @@ class YouGetDB:
                 (origin,))
         return cur.fetchone()
 
+    def fixup_task_data(self, data_dict):
+        """Encoding none standard data type into latin1 json bytes"""
+        if "options" in data_dict:
+            data_dict["options"] = json.dumps(data_dict["options"]).encode(
+                    "latin1")
+        if "playlist" in data_dict:
+            pl = data_dict["playlist"]
+            if pl is not None:
+                pl = list(pl)
+            data_dict["playlist"] = json.dumps(pl).encode("latin1")
+        return data_dict
+
     def set_task_values(self, origin, data_dict):
         cur = self.con.cursor()
-        data_dict["origin"] = origin
 
         keys = data_dict.keys()
         set_list = ["{}=:{}".format(x,x) for x in keys]
         set_str = ", ".join(set_list)
+
+
+        data_dict = self.fixup_task_data(data_dict)
+        # make sure origin is in data_dict
+        data_dict["origin"] = origin
 
         cur.execute('UPDATE {} SET {} WHERE origin=:origin'.format(
             self.task_tab, set_str), data_dict)
@@ -142,6 +172,9 @@ class YouGetDB:
         # insert sqlite3 with named placeholder
         keys = data_dict.keys()
         keys_tagged = [":"+x for x in keys]
+
+        data_dict = self.fixup_task_data(data_dict)
+
         cur = self.con.cursor()
         cur.execute(''' INSERT INTO {} ({}) VALUES ({}) '''.format(
                     self.task_tab,
@@ -191,31 +224,35 @@ def log_exc(msg=""):
 
 def my_download_main(download, download_playlist, urls, playlist, **kwargs):
     ret = 1
+    task = kwargs.get("task", None)
+    del kwargs["task"]
     try:
         common.download_main(download, download_playlist, urls, playlist,
                 **kwargs)
     except:
         ret = -1
         log_exc()
-    if "task" in kwargs:
+    if task is not None:
         if ret < 0:
-            kwargs["task"].success += ret
+            task.success += ret
         else:
-            kwargs["task"].success = ret
+            task.success = ret
 
 class Task(thread_monkey_patch.TaskBase):
     """Represent a single threading download task"""
-    def __init__(self, url=None, do_playlist=False, output_dir=".",
-            merge=True, extractor_proxy=None, use_extractor_proxy=False,
-            stream_id=None):
-        self.origin = url
-        self.output_dir = output_dir
-        self.do_playlist = do_playlist
-        self.merge = merge
-        self.extractor_proxy = extractor_proxy
-        self.use_extractor_proxy = use_extractor_proxy
-        self.stream_id = stream_id
+    def __init__(self, **options):
+        self.options = {
+                "url": None,
+                "do_playlist": False,
+                "output_dir": ".",
+                "merge": True,
+                "extractor_proxy": None,
+                "stream_id": None,
+                }
+        self.options.update(options)
+        self.origin = self.options["url"]
 
+        self.priority = 100
         self.progress_bar = None
         self.title = None
         self.real_urls = None # a list of urls
@@ -229,7 +266,7 @@ class Task(thread_monkey_patch.TaskBase):
         self.finished = False
         self.success = 0
 
-        if self.do_playlist:
+        if self.options["do_playlist"]:
             self.playlist = set()
 
         self.save_event = threading.Event() # db need save
@@ -294,7 +331,7 @@ class Task(thread_monkey_patch.TaskBase):
         if file_path is not None:
             if self.filepath is None:
                 self.filepath = file_path
-            if self.do_playlist and file_path not in self.playlist:
+            if self.options["do_playlist"] and file_path not in self.playlist:
                 f = os.path.basename(file_path)
                 self.playlist.add(f)
 
@@ -308,37 +345,31 @@ class Task(thread_monkey_patch.TaskBase):
         self.update()
         current_data = self.get_database_data()
         old_data = db.get_task_values(self.origin)
-        new_info = {}
-        old_keys = set(old_data.keys()) # old_data is not really a dict.
-        for k, v in current_data.items():
-            if (k not in old_keys) or (old_data[k] != v):
-                new_info[k] = v
-        if len(new_info) > 0:
-            db.set_task_values(self.origin, new_info)
+        if old_data is not None:
+            new_info = {}
+            old_keys = set(old_data.keys()) # old_data is not really a dict.
+            for k, v in current_data.items():
+                if (k not in old_keys) or (old_data[k] != v):
+                    new_info[k] = v
+            if len(new_info) > 0:
+                db.set_task_values(self.origin, new_info)
         self.save_event.clear()
 
     def get_database_data(self):
         """prepare data for database insertion"""
         keys = [ # Task keys for db
                 "origin",
-                "output_dir",
-                "do_playlist",
-                "merge",
-                "extractor_proxy",
-                "use_extractor_proxy",
-                "stream_id",
+                "options",
+                "priority",
                 "title",
                 "filepath",
                 "success",
                 "total_size",
                 "received",
+                "playlist",
                 ]
         data = {x: getattr(self, x, None) for x in keys }
         data["total_size"] = self.get_total()
-        if self.do_playlist:
-            data["playlist"] = json.dumps(list(self.playlist))
-        else:
-            data["playlist"] = json.dumps(self.playlist)
         return data
 
     # Override TaskBase() Here
@@ -348,22 +379,69 @@ class Task(thread_monkey_patch.TaskBase):
 
     def target(self, *dummy_args, **dummy_kwargs):
         """Called by the TaskBase start a task thread"""
+        options = self.options
         args = (common.any_download, common.any_download_playlist,
-                [self.origin], self.do_playlist)
+                [self.origin], options["do_playlist"])
         kwargs = {
-                "output_dir": self.output_dir,
-                "merge": self.merge,
+                "output_dir": options["output_dir"],
+                "merge": options["merge"],
                 "info_only": False,
                 "task": self,
                 }
-        if self.use_extractor_proxy and self.extractor_proxy:
-            kwargs["extractor_proxy"] = self.extractor_proxy
+        if options["extractor_proxy"]:
+            kwargs["extractor_proxy"] = options["extractor_proxy"]
 
-        if self.stream_id:
-            kwargs["stream_id"] = self.stream_id
+        if options["stream_id"]:
+            kwargs["stream_id"] = options["stream_id"]
 
         my_download_main(*args, **kwargs)
         return args, kwargs
+
+class PriorityQueue:
+    """See the "8.5.2. Priority Queue Implementation Notes" of heapq doc"""
+    REMOVED = "<removed-task>"
+    def __init__(self):
+        import itertool
+        self.queue = []
+        self.counter = itertool.count() # to order tasks with same priority
+        self.entry_finder = {}
+
+    def push(self, task, priority):
+        # reverse priority since the heapq is min head
+        priority = -priority
+        if task in self.entry_finder:
+            self.remove_task(task)
+        count = next(self.counter)
+        entry = [priority, count, task]
+        self.entry_finder[task] = entry
+        heapq.heappush(self.queue, entry)
+
+    def remove(self, task):
+        """Remove a task from the priority queue"""
+        # We actually mark the entry as been removed and del from entry_finder
+        entry = self.entry_finder.pop(task)
+        entry[-1] = self.REMOVED
+
+    def pop(self):
+        """Pop largest priority task"""
+        # loop until we found an non-removed task
+        while self.queue:
+            priority, count, task = heapq.heappop(self.queue)
+            if task is not self.REMOVED:
+                del self.entry_finder[task]
+                return task
+        raise KeyError("pop from an empty priority queue")
+
+    def __len__(self):
+        return len(self.entry_finder)
+
+    def __contains__(self, task):
+        return task in self.entry_finder
+
+    def all(self):
+        """Return all tasks as a list"""
+        tasks = self.entry_finder.keys()
+        return tasks
 
 class TaskManager:
     """Task Manager for multithreading download
@@ -397,9 +475,24 @@ class TaskManager:
         if isinstance(atask, str):
              atask = self.get_task(atask)
         if not atask: return
+
         if atask.success < 0:
             atask.success = 0
+
+        if atask in self.task_waiting_queue:
+            return
         self.task_waiting_queue.append(atask)
+        self.update_task_queue()
+
+    def stop_tasks(self, origins):
+        if isinstance(origins, str):
+            origins = [origins]
+        for origin in origins:
+            task = self.tasks[origin]
+            if task in self.task_waiting_queue:
+                self.task_waiting_queue.remove(task)
+            if task in self.task_running_queue:
+                self.task_running_queue.remove(task)
         self.update_task_queue()
 
     def get_running_tasks(self):
@@ -430,9 +523,6 @@ class TaskManager:
                     atask.start()
         except IndexError:
             pass
-
-    def urls2uuid(self, urls):
-        return "-".join(urls)
 
     def has_task(self, origin):
         ret = origin in self.tasks
@@ -482,11 +572,11 @@ class TaskManager:
         """Remove tasks from TaskManager and Database"""
         if isinstance(origins, str):
             origins = [origins]
+        self.stop_tasks(origins)
+
         for origin in origins:
-            task = self.tasks[origin]
+            self.tasks[origin]
             del self.tasks[origin]
-            if task in self.task_waiting_queue:
-                self.task_waiting_queue.remove(task)
         self.app.database.delete_task(origins)
 
     def load_tasks_from_database(self):
@@ -501,10 +591,6 @@ class TaskManager:
                 for key in row.keys():
                     if hasattr(atask, key):
                         setattr(atask, key, row[key])
-                playlist = json.loads(row["playlist"])
-                if atask.do_playlist:
-                    playlist = set(playlist)
-                atask.playlist = playlist
 
                 #for k in row.keys(): print(row[k])
                 if atask.success < 1:
