@@ -548,7 +548,7 @@ class TaskManager:
 
     def get_tasks(self):
         """Get all the tasks"""
-        ret = self.tasks.items()
+        ret = self.tasks.values()
         return ret
 
     def attach_task(self, atask, queue=False):
@@ -579,14 +579,14 @@ class TaskManager:
 
     def get_successed_tasks(self):
         ret = []
-        for origin, atask in self.get_tasks():
+        for atask in self.get_tasks():
             if atask.success > 0:
                 ret.append(atask)
         return ret
 
     def get_failed_tasks(self):
         ret = []
-        for origin, atask in self.get_tasks():
+        for atask in self.get_tasks():
             if atask.success < 0:
                 ret.append(atask)
         return ret

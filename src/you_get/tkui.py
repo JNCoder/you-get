@@ -484,13 +484,14 @@ class App(ttk.Frame):
         """Update task status"""
 
         # need to track changed task before doing update_task_queue()
-        items = self.task_manager.get_tasks()
-        changed_tasks = set([x[1] for x in items if x[1].changed()])
+        tasks = self.task_manager.get_tasks()
+        changed_tasks = set([x for x in tasks if x.changed()])
         self.task_manager.update_task_queue()
 
         tc = self.tree_cols
         tree = self.tree_task
-        for origin, atask in items:
+        for atask in tasks:
+            origin = atask.origin
             if atask.status in {"finished", "created", atask.thread}:
                 continue
             elif atask.thread is None and atask.status == "started":
