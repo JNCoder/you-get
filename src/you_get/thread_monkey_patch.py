@@ -385,7 +385,7 @@ def thread_urlopen(url, data=None, timeout=socket._GLOBAL_DEFAULT_TIMEOUT,
     return opener.open(url, data, timeout)
 
 def thread_build_opener(*args):
-    """Add cookiejar if available to any opener"""
+    """Add cookiejar to any opener, if common.cookies_txt available"""
     if common.cookies_txt is not None:
         cookie_handler = request.HTTPCookieProcessor(common.cookies_txt)
         args = args + (cookie_handler,)

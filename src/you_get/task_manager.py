@@ -131,6 +131,13 @@ class YouGetDB:
                 (origin,))
         return cur.fetchone()
 
+    def get_task_values_by_id(self, aid):
+        """Return one task """
+        cur = self.con.cursor()
+        cur.execute("SELECT * FROM {} where id=?".format(self.task_tab),
+                (aid,))
+        return cur.fetchone()
+
     def fixup_task_data(self, data_dict):
         """Encoding none standard data type into latin1 json bytes"""
         if "options" in data_dict:
@@ -146,6 +153,8 @@ class YouGetDB:
     def set_task_values(self, origin, data_dict):
         cur = self.con.cursor()
 
+        if "id" in data_dict:
+            del data_dict["id"]
         keys = data_dict.keys()
         set_list = ["{}=:{}".format(x,x) for x in keys]
         set_str = ", ".join(set_list)
@@ -170,6 +179,8 @@ class YouGetDB:
 
     def add_task(self, data_dict):
         # insert sqlite3 with named placeholder
+        if "id" in data_dict:
+            del data_dict["id"]
         keys = data_dict.keys()
         keys_tagged = [":"+x for x in keys]
 
@@ -182,6 +193,7 @@ class YouGetDB:
                     ", ".join(keys_tagged)),
                 data_dict)
         self.con.commit()
+        return cur.lastrowid
 
     def save_config(self, config):
         """Save the config_tab table"""
@@ -252,6 +264,7 @@ class Task(thread_monkey_patch.TaskBase):
         self.options.update(options)
         self.origin = self.options["url"]
 
+        self.id = -1
         self.priority = 100
         self.progress_bar = None
         self.title = None
@@ -263,7 +276,7 @@ class Task(thread_monkey_patch.TaskBase):
         self.received = 0 # keep a record of progress changes
         self.speed = 0
         self.last_update_time = -1
-        self.finished = False
+        self.status = "created" # task status
         self.success = 0
 
         if self.options["do_playlist"]:
@@ -272,6 +285,14 @@ class Task(thread_monkey_patch.TaskBase):
         self.save_event = threading.Event() # db need save
         self.save_event.clear()
         self.update_lock = threading.Lock()
+        self.add_database_lock = threading.Lock()
+
+    def add_to_database(self, database):
+        self.add_database_lock.acquire()
+        aid = database.add_task(self.get_database_data())
+        self.add_database_lock.release()
+        self.id = aid
+        return aid
 
     def get_total(self):
         ret = self.total_size
@@ -337,6 +358,7 @@ class Task(thread_monkey_patch.TaskBase):
 
         if progress_bar is not None:
             self.progress_bar = progress_bar
+            self.total_size = progress_bar.total_size
 
         self.update()
         self.save_event.set()
@@ -358,6 +380,7 @@ class Task(thread_monkey_patch.TaskBase):
     def get_database_data(self):
         """prepare data for database insertion"""
         keys = [ # Task keys for db
+                "id",
                 "origin",
                 "options",
                 "priority",
@@ -375,7 +398,7 @@ class Task(thread_monkey_patch.TaskBase):
     # Override TaskBase() Here
     def pre_thread_start(self, athread):
         athread.name = self.origin
-        self.finished = False
+        self.status = "started"
 
     def target(self, *dummy_args, **dummy_kwargs):
         """Called by the TaskBase start a task thread"""
@@ -456,20 +479,10 @@ class TaskManager:
 
     def start_download(self, info):
         """Start a download task in a new thread"""
-        url = info["url"]
-
-        if not url:
-            return
-        elif self.has_task(url):
-            err_msg = "Task for the URL: {} already exists".format(url)
-            raise(TaskError(err_msg))
-
-        atask = Task(**info)
-        self.app.database.add_task(atask.get_database_data())
-        self.tasks[url] = atask
-
-        self.app.attach_download_task(atask)
-        self.queue_task(atask)
+        atask = self.new_task(**info)
+        atask.add_to_database(self.app.database)
+        self.attach_task(atask, True)
+        return atask
 
     def queue_task(self, atask):
         if isinstance(atask, str):
@@ -502,6 +515,9 @@ class TaskManager:
         if len(self.task_running_queue) > 0:
             new_run = []
             for atask in self.task_running_queue:
+                if atask.changed():
+                    atask.update()
+
                 if atask.thread.is_alive():
                     if atask.save_event.is_set():
                         atask.save_db(self.app.database)
@@ -511,6 +527,8 @@ class TaskManager:
                     # requeue on failed
                     if -self.max_retry < atask.success < 0:
                         self.task_waiting_queue.append(atask)
+                    atask.thread = None
+                    atask.progress_bar = None
             self.task_running_queue = new_run
 
         run_queue = self.task_running_queue
@@ -533,8 +551,14 @@ class TaskManager:
         ret = self.tasks.items()
         return ret
 
+    def attach_task(self, atask, queue=False):
+        """attach a task to task manager"""
+        self.tasks[atask.origin] = atask
+        if queue == True:
+            self.queue_task(atask)
+
     def new_task(self, **task_info):
-        """create a new task"""
+        """create a new task, not attached to task_manager"""
         err_msg = None
         origin = task_info.get("url", None)
 
@@ -546,7 +570,6 @@ class TaskManager:
             raise(TaskError(err_msg))
 
         atask = Task(**task_info)
-        self.tasks[origin] = atask
         return atask
 
     def get_task(self, origin):
@@ -554,7 +577,7 @@ class TaskManager:
         ret = self.tasks.get(origin, None)
         return ret
 
-    def get_success_tasks(self):
+    def get_successed_tasks(self):
         ret = []
         for origin, atask in self.get_tasks():
             if atask.success > 0:
@@ -588,6 +611,7 @@ class TaskManager:
             #print(dict(zip(row.keys(), list(row))))#; sys.exit()
             try:
                 atask = self.new_task(url=row["origin"])
+                self.attach_task(atask)
                 for key in row.keys():
                     if hasattr(atask, key):
                         setattr(atask, key, row[key])

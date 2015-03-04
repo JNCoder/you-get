@@ -185,7 +185,9 @@ class App(ttk.Frame):
     def __init__(self, parent):
         super().__init__(parent)
         self.parent = parent
-        self.cookie_jar = None
+        self.cookiejar = None
+        self.timeout_update_task = 3000 # in mseconds
+        self.timeout_update_gui = 1000
 
         self.task_manager = task_manager.TaskManager(self)
         self.data_folder = task_manager.setup_data_folder(APPNAME)
@@ -422,7 +424,8 @@ class App(ttk.Frame):
                     if not info["use_extractor_proxy"]:
                         info["extractor_proxy"] = None
                     del info["use_extractor_proxy"]
-                    self.task_manager.start_download(info)
+                    atask = self.task_manager.start_download(info)
+                    self.attach_download_task(atask)
         except task_manager.TaskError as err:
             msg = str(err)
             messagebox.showerror(title="You-Get Error", message=msg)
@@ -449,7 +452,7 @@ class App(ttk.Frame):
         self.remove_tasks(origins)
 
     def clear_successed_task(self, *args):
-        tasks = self.task_manager.get_success_tasks()
+        tasks = self.task_manager.get_successed_tasks()
         origins = [x.origin for x in tasks]
         self.remove_tasks(origins)
 
@@ -470,7 +473,7 @@ class App(ttk.Frame):
         if atask.success > 0:
             cols[tc.progress] = "Done"
             tag = "done"
-            atask.finished = True
+            #atask.status = "finished"
         else:
             cols[tc.progress] = "{:.2f}%".format(atask.percent_done())
         cols[tc.origin] = atask.origin
@@ -479,14 +482,18 @@ class App(ttk.Frame):
 
     def update_task(self):
         """Update task status"""
+
+        # need to track changed task before doing update_task_queue()
+        items = self.task_manager.get_tasks()
+        changed_tasks = set([x[1] for x in items if x[1].changed()])
+        self.task_manager.update_task_queue()
+
         tc = self.tree_cols
         tree = self.tree_task
-        items = self.task_manager.get_tasks()
         for origin, atask in items:
-            if atask.thread is None or atask.finished == True:
+            if atask.status in {"finished", "created", atask.thread}:
                 continue
-            elif not atask.thread.is_alive():
-                atask.update()
+            elif atask.thread is None and atask.status == "started":
                 if atask.success > 0:
                     tree.item(origin, tags=["done"])
                     tree.set(origin, tc.progress, "Done")
@@ -503,9 +510,8 @@ class App(ttk.Frame):
                 tree.set(origin, tc.size, total_size )
                 tree.set(origin, tc.speed, speed)
 
-                atask.finished = True
-            elif atask.changed():
-                atask.update()
+                atask.status = "finished"
+            elif atask in changed_tasks:
                 percent = "{:.2f}%".format(atask.percent_done())
                 total_size = num2human(atask.get_total())
                 total_size = "{}B".format(total_size)
@@ -527,8 +533,6 @@ class App(ttk.Frame):
                 speed_0 = "0B/s"
                 if speed not in {speed_0, "-"}:
                     tree.set(origin, tc.speed, speed_0)
-
-        self.task_manager.update_task_queue()
 
     def check_log(self):
         """Check log_queue and output log messages"""
@@ -592,17 +596,17 @@ class App(ttk.Frame):
             config["settings_" + k] = v
         self.database.save_config(config)
 
-    def periodic_update_1s(self):
-        """Do some periodic update work"""
-        timeout = 1000 # in mseconds
+    def periodic_gui_update(self):
+        timeout = self.timeout_update_gui
         self.check_log()
+        self.parent.after(timeout, self.periodic_gui_update)
 
-        self.parent.after(timeout, self.periodic_update_1s)
-
-    def periodic_update_5s(self):
-        timeout = 5000 # in mseconds
+    def periodic_task_update(self):
+        """Do some periodic update work"""
+        timeout = self.timeout_update_task # in mseconds
         self.update_task()
-        self.parent.after(timeout, self.periodic_update_5s)
+
+        self.parent.after(timeout, self.periodic_task_update)
 
     def setup_cookiejar(self):
         """setup cookie jar
@@ -615,11 +619,11 @@ class App(ttk.Frame):
         except OSError:
             pass # file not found
         common.cookies_txt = cookies_txt
-        self.cookie_jar = cookies_txt
+        self.cookiejar = cookies_txt
 
     def start(self):
-        self.periodic_update_1s()
-        self.periodic_update_5s()
+        self.periodic_task_update()
+        self.periodic_gui_update()
         self.parent.mainloop()
 
     def stop(self, *args):
@@ -627,7 +631,7 @@ class App(ttk.Frame):
         self.parent.withdraw() # hide main window immediately
         self.parent.quit()
 
-        self.cookie_jar.save()
+        self.cookiejar.save()
         task_items = self.task_manager.get_running_tasks()
         for atask in task_items:
             atask.save_db(self.database)
