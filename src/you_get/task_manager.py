@@ -140,6 +140,8 @@ class YouGetDB:
 
     def fixup_task_data(self, data_dict):
         """Encoding none standard data type into latin1 json bytes"""
+        if "id" in data_dict:
+            del data_dict["id"]
         if "options" in data_dict:
             data_dict["options"] = json.dumps(data_dict["options"]).encode(
                     "latin1")
@@ -153,14 +155,12 @@ class YouGetDB:
     def set_task_values(self, origin, data_dict):
         cur = self.con.cursor()
 
-        if "id" in data_dict:
-            del data_dict["id"]
+        data_dict = self.fixup_task_data(data_dict)
+
         keys = data_dict.keys()
         set_list = ["{}=:{}".format(x,x) for x in keys]
         set_str = ", ".join(set_list)
 
-
-        data_dict = self.fixup_task_data(data_dict)
         # make sure origin is in data_dict
         data_dict["origin"] = origin
 
@@ -179,12 +179,11 @@ class YouGetDB:
 
     def add_task(self, data_dict):
         # insert sqlite3 with named placeholder
-        if "id" in data_dict:
-            del data_dict["id"]
+        data_dict = self.fixup_task_data(data_dict)
+
         keys = data_dict.keys()
         keys_tagged = [":"+x for x in keys]
 
-        data_dict = self.fixup_task_data(data_dict)
 
         cur = self.con.cursor()
         cur.execute(''' INSERT INTO {} ({}) VALUES ({}) '''.format(
