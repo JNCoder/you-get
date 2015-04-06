@@ -3,6 +3,7 @@
 
 import os
 import sys
+import enum
 import time
 import json
 import heapq
@@ -38,6 +39,13 @@ def setup_data_folder(appname):
 class TaskError(Exception):
     pass
 
+class TaskStatus(enum.Enum):
+    Create = 1
+    Queue  = 2
+    Start  = 3
+    Stop   = 4
+    Done   = 5
+
 # Sqlite3 DataType converter
 def sql_convert_options(abytes):
     """deocode json encoded option dict"""
@@ -51,8 +59,21 @@ def sql_convert_playlist(abytes):
         playlist= set(playlist)
     return playlist
 
+def sql_convert_enum(abytes):
+    astr = abytes.decode("latin1")
+    enum_type, _, enum_name = astr.partition(".")
+    klass = globals()[enum_type]
+    if not issubclass(klass, enum.Enum):
+        raise TypeError("Wrong type: {}".format(enum_type))
+    return klass[enum_name]
+
+def sql_adapt_enum(enum_var):
+    return str(enum_var)
+
 sqlite3.register_converter("JOPTIONS", sql_convert_options)
 sqlite3.register_converter("JPLAYLIST", sql_convert_playlist)
+sqlite3.register_converter("ENUM", sql_convert_enum)
+sqlite3.register_adapter(TaskStatus, sql_adapt_enum)
 
 class YouGetDB:
     """Sqlite database class for program data"""
@@ -81,6 +102,9 @@ class YouGetDB:
         return version
 
     def setup_database(self):
+        dirname = os.path.dirname(self.path)
+        if not os.path.exists(dirname):
+            os.makedirs(dirname)
         con = self.con = sqlite3.connect(self.path,
                 detect_types=sqlite3.PARSE_DECLTYPES)
         con.row_factory = sqlite3.Row
@@ -96,6 +120,7 @@ class YouGetDB:
             playlist JPLAYLIST,
             title TEXT,
             filepath TEXT,
+            status ENUM,
             success INTEGER,
             total_size INTEGER,
             received INTEGER
@@ -142,9 +167,11 @@ class YouGetDB:
         """Encoding none standard data type into latin1 json bytes"""
         if "id" in data_dict:
             del data_dict["id"]
+
         if "options" in data_dict:
             data_dict["options"] = json.dumps(data_dict["options"]).encode(
                     "latin1")
+
         if "playlist" in data_dict:
             pl = data_dict["playlist"]
             if pl is not None:
@@ -183,7 +210,6 @@ class YouGetDB:
 
         keys = data_dict.keys()
         keys_tagged = [":"+x for x in keys]
-
 
         cur = self.con.cursor()
         cur.execute(''' INSERT INTO {} ({}) VALUES ({}) '''.format(
@@ -273,9 +299,9 @@ class Task(thread_monkey_patch.TaskBase):
         self.thread = None
         self.total_size = 0
         self.received = 0 # keep a record of progress changes
-        self.speed = 0
+        self.speed = -1
         self.last_update_time = -1
-        self.status = "created" # task status
+        self.status = TaskStatus.Create # task status
         self.success = 0
 
         if self.options["do_playlist"]:
@@ -287,6 +313,7 @@ class Task(thread_monkey_patch.TaskBase):
         self.add_database_lock = threading.Lock()
 
     def add_to_database(self, database):
+        """Add the task to database"""
         self.add_database_lock.acquire()
         aid = database.add_task(self.get_database_data())
         self.add_database_lock.release()
@@ -294,6 +321,7 @@ class Task(thread_monkey_patch.TaskBase):
         return aid
 
     def get_total(self):
+        """Get total size"""
         ret = self.total_size
         if self.progress_bar is not None:
             ret = self.progress_bar.total_size
@@ -307,8 +335,9 @@ class Task(thread_monkey_patch.TaskBase):
         return ret
 
     def update(self):
-        if self.progress_bar:
-            self.update_lock.acquire()
+        """Update task progress"""
+        self.update_lock.acquire()
+        if self.progress_bar and self.changed():
             now = time.time()
             received = self.progress_bar.received
             received_last = self.received
@@ -322,13 +351,15 @@ class Task(thread_monkey_patch.TaskBase):
                     self.speed = 0
 
             self.last_update_time = now
-            if received_last != received:
-                self.received = received
-            self.update_lock.release()
+            self.received = received
+        elif self.progress_bar:
+            self.speed = 0
+        self.update_lock.release()
 
         return self.received
 
     def percent_done(self):
+        """Calculate downloaded percent"""
         total = self.get_total()
         if total <= 0:
             return 0
@@ -385,6 +416,7 @@ class Task(thread_monkey_patch.TaskBase):
                 "priority",
                 "title",
                 "filepath",
+                "status",
                 "success",
                 "total_size",
                 "received",
@@ -397,10 +429,12 @@ class Task(thread_monkey_patch.TaskBase):
     # Override TaskBase() Here
     def pre_thread_start(self, athread):
         athread.name = self.origin
-        self.status = "started"
 
     def target(self, *dummy_args, **dummy_kwargs):
         """Called by the TaskBase start a task thread"""
+        self.status = TaskStatus.Start
+        self.save_event.set()
+
         options = self.options
         args = (common.any_download, common.any_download_playlist,
                 [self.origin], options["do_playlist"])
@@ -416,8 +450,12 @@ class Task(thread_monkey_patch.TaskBase):
         if options["stream_id"]:
             kwargs["stream_id"] = options["stream_id"]
 
-        my_download_main(*args, **kwargs)
-        return args, kwargs
+        ret = my_download_main(*args, **kwargs)
+
+        self.speed = -1
+        self.status = TaskStatus.Stop
+        self.save_event.set()
+        return ret
 
 class PriorityQueue:
     """See the "8.5.2. Priority Queue Implementation Notes" of heapq doc"""
@@ -475,71 +513,124 @@ class TaskManager:
         self.task_waiting_queue = collections.deque()
         self.max_task = 5
         self.max_retry = 3
+        self.thread_local = threading.local()
+
+    def get_database(self):
+        """Sqlite connection cannot be shared across thread"""
+        if hasattr(self.thread_local, "database"):
+            return self.thread_local.database
+
+        database = self.app.database
+        if database is None:
+            database = self.app.new_database()
+        self.thread_local.database = database
+        return database
 
     def start_download(self, info):
         """Start a download task in a new thread"""
+        database = self.get_database()
+
         atask = self.new_task(**info)
-        atask.add_to_database(self.app.database)
-        self.attach_task(atask, True)
+        atask.add_to_database(database)
+        self.attach_task(atask)
         return atask
 
-    def queue_task(self, atask):
-        if isinstance(atask, str):
-             atask = self.get_task(atask)
-        if not atask: return
+    def normalize_task_list(self, tasks):
+        """fix tasks into a list of Task objects"""
+        if isinstance(tasks, str) or not hasattr(tasks, "__iter__"):
+            tasks = [tasks]
+        task_list = []
+        for atask in tasks:
+            if not isinstance(atask, Task):
+                atask = self.get_task(atask)
+            if atask:
+                task_list.append(atask)
+        return task_list
 
-        if atask.success < 0:
-            atask.success = 0
+    def queue_tasks(self, tasks):
+        """Add a task to download queue"""
+        task_list = self.normalize_task_list(tasks)
+        for atask in task_list:
+            if atask.success < 0:
+                atask.success = 0
 
-        if atask in self.task_waiting_queue:
-            return
-        self.task_waiting_queue.append(atask)
+            if atask in self.task_waiting_queue:
+                continue
+
+            atask.status = TaskStatus.Queue
+            atask.save_event.set()
+            self.task_waiting_queue.append(atask)
         self.update_task_queue()
 
-    def stop_tasks(self, origins):
-        if isinstance(origins, str):
-            origins = [origins]
-        for origin in origins:
-            task = self.tasks[origin]
-            if task in self.task_waiting_queue:
-                self.task_waiting_queue.remove(task)
-            if task in self.task_running_queue:
-                self.task_running_queue.remove(task)
+    def stop_tasks(self, tasks):
+        """Stop a task by remove it from download queue and running queue"""
+        task_list = self.normalize_task_list(tasks)
+        for atask in task_list:
+            if atask in self.task_waiting_queue:
+                self.task_waiting_queue.remove(atask)
+                atask.status = TaskStatus.Stop
+            if atask in self.task_running_queue:
+                self.task_running_queue.remove(atask)
+                atask.status = TaskStatus.Stop
+            atask.stop()
+        self.update_task_queue()
+
+    def start_tasks(self, tasks):
+        """Start tasks by remove from download queue and append running queue"""
+        task_list = self.normalize_task_list(tasks)
+        for atask in task_list:
+            if atask in self.task_running_queue:
+                continue
+
+            if atask in self.task_waiting_queue:
+                self.task_waiting_queue.remove(atask)
+            self.task_running_queue.append(atask)
+            atask.start()
         self.update_task_queue()
 
     def get_running_tasks(self):
         return self.task_running_queue
 
-    def update_task_queue(self):
-        if len(self.task_running_queue) > 0:
-            new_run = []
-            for atask in self.task_running_queue:
-                if atask.changed():
-                    atask.update()
+    def update_tasks(self):
+        """Update status of tasks and task queues"""
+        for atask in self.task_running_queue:
+            atask.update()
+        self.update_task_queue()
 
-                if atask.thread.is_alive():
-                    if atask.save_event.is_set():
-                        atask.save_db(self.app.database)
-                    new_run.append(atask)
-                else:
-                    atask.save_db(self.app.database)
-                    # requeue on failed
+    def update_task_queue(self):
+        """Remove finished queue and start new task in waiting queue"""
+        database = self.get_database()
+
+        if len(self.task_running_queue) > 0:
+            for atask in list(self.task_running_queue):
+                if not atask.thread.is_alive():
+                    self.task_running_queue.remove(atask)
+                    # re-queue on failure
                     if -self.max_retry < atask.success < 0:
                         self.task_waiting_queue.append(atask)
+                        atask.status = TaskStatus.Queue
+                    atask.save_event.set()
                     atask.thread = None
                     atask.progress_bar = None
-            self.task_running_queue = new_run
 
         run_queue = self.task_running_queue
+        run_tasks = []
         try:
             if len(run_queue) < self.max_task:
                 available_slot = self.max_task - len(run_queue)
                 for i in range(available_slot):
                     atask = self.task_waiting_queue.popleft()
-                    run_queue.append(atask)
-                    atask.start()
-        except IndexError:
+                    run_tasks.append(atask)
+        except IndexError as err:
+            #print(err)
             pass
+        if len(run_tasks) > 0:
+            self.start_tasks(run_tasks)
+
+        # save tasks that need to be saved
+        for atask in self.get_tasks():
+            if atask.save_event.is_set():
+                atask.save_db(database)
 
     def has_task(self, origin):
         ret = origin in self.tasks
@@ -554,7 +645,7 @@ class TaskManager:
         """attach a task to task manager"""
         self.tasks[atask.origin] = atask
         if queue == True:
-            self.queue_task(atask)
+            self.queue_tasks([atask])
 
     def new_task(self, **task_info):
         """create a new task, not attached to task_manager"""
@@ -590,22 +681,24 @@ class TaskManager:
                 ret.append(atask)
         return ret
 
-    def remove_tasks(self, origins):
+    def remove_tasks(self, tasks):
         """Remove tasks from TaskManager and Database"""
-        if isinstance(origins, str):
-            origins = [origins]
-        self.stop_tasks(origins)
+        database = self.get_database()
 
+        task_list = self.normalize_task_list(tasks)
+        self.stop_tasks(task_list)
+        origins = [t.origin for t in task_list]
         for origin in origins:
-            self.tasks[origin]
             del self.tasks[origin]
-        self.app.database.delete_task(origins)
+        database.delete_task(origins)
 
     def load_tasks_from_database(self):
         """Load saved tasks to TaskManager from database"""
-        database = self.app.database
+        database = self.get_database()
+
         tasks = database.get_task_list()
         task_objs = []
+        queued = []
         for row in tasks:
             #print(dict(zip(row.keys(), list(row))))#; sys.exit()
             try:
@@ -616,12 +709,14 @@ class TaskManager:
                         setattr(atask, key, row[key])
 
                 #for k in row.keys(): print(row[k])
-                if atask.success < 1:
-                    self.queue_task(atask)
+                if atask.status in [TaskStatus.Queue, TaskStatus.Start]:
+                    queued.append(atask)
 
                 task_objs.append(atask)
             except TaskError as e:
                 log.w(str(e))
+        if queued:
+            self.queue_tasks(queued)
         return task_objs
 
 def main():

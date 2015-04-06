@@ -14,6 +14,7 @@ from tkinter import ttk
 
 from . import thread_monkey_patch
 from . import task_manager
+from .task_manager import TaskStatus
 from . import common
 from .util import log
 
@@ -190,15 +191,24 @@ class App(ttk.Frame):
         self.timeout_update_gui = 1000
 
         self.task_manager = task_manager.TaskManager(self)
-        self.data_folder = task_manager.setup_data_folder(APPNAME)
+        self.data_folder = os.path.join(
+                task_manager.setup_data_folder(APPNAME), "tkui")
         log.i("Data Folder: {}".format(self.data_folder))
-        self.database = task_manager.YouGetDB(self.db_fname, self.data_folder)
         self.log_queue = queue.Queue(LOG_QUEUE_SIZE)
 
         self.setup_ui()
         self.settings = {
                 "output_dir": os.path.abspath("."),
                 }
+        self.database = self.new_database()
+        self.parent.after(100, self.delay_init)
+
+    def new_database(self):
+        database = task_manager.YouGetDB(self.db_fname, self.data_folder)
+        return database
+
+    def delay_init(self):
+        """Delay load slow stuff after GUI Window shows up"""
         self.load_config()
         self.setup_cookiejar()
         self.load_tasks_from_database()
@@ -391,6 +401,7 @@ class App(ttk.Frame):
        Dir: {output_dir:}
      Total: {total:}
   Received: {received:}
+    Status: {status:}
 
     Format: {stream_id:}
   Playlist: {do_playlist:}
@@ -425,6 +436,7 @@ class App(ttk.Frame):
                         info["extractor_proxy"] = None
                     del info["use_extractor_proxy"]
                     atask = self.task_manager.start_download(info)
+                    self.task_manager.queue_tasks([atask])
                     self.attach_download_task(atask)
         except task_manager.TaskError as err:
             msg = str(err)
@@ -433,12 +445,7 @@ class App(ttk.Frame):
     def restart_selected_task(self, *args):
         origins = self.tree_task.selection()
         if not origins: return
-        for o in origins:
-            atask = self.task_manager.get_task(o)
-            if atask.success < 0:
-                atask.success = 0
-            self.task_manager.queue_task(atask)
-        self.task_manager.update_task_queue()
+        self.task_manager.queue_tasks(origins)
 
     def remove_tasks(self, origins):
         """remove tasks with the given origins"""
@@ -486,15 +493,15 @@ class App(ttk.Frame):
         # need to track changed task before doing update_task_queue()
         tasks = self.task_manager.get_tasks()
         changed_tasks = set([x for x in tasks if x.changed()])
-        self.task_manager.update_task_queue()
+        self.task_manager.update_tasks()
 
         tc = self.tree_cols
         tree = self.tree_task
         for atask in tasks:
             origin = atask.origin
-            if atask.status in {"finished", "created", atask.thread}:
+            if atask.status in {TaskStatus.Create, TaskStatus.Done}:
                 continue
-            elif atask.thread is None and atask.status == "started":
+            elif atask.thread is None and atask.status == TaskStatus.Stop:
                 if atask.success > 0:
                     tree.item(origin, tags=["done"])
                     tree.set(origin, tc.progress, "Done")
@@ -511,7 +518,7 @@ class App(ttk.Frame):
                 tree.set(origin, tc.size, total_size )
                 tree.set(origin, tc.speed, speed)
 
-                atask.status = "finished"
+                atask.status = TaskStatus.Done
             elif atask in changed_tasks:
                 percent = "{:.2f}%".format(atask.percent_done())
                 total_size = num2human(atask.get_total())
@@ -633,9 +640,14 @@ class App(ttk.Frame):
         self.parent.quit()
 
         self.cookiejar.save()
+        database = self.database
         task_items = self.task_manager.get_running_tasks()
         for atask in task_items:
-            atask.save_db(self.database)
+            atask.save_db(database)
+        task_items = self.task_manager.get_tasks()
+        for atask in task_items:
+            if atask.save_event.is_set():
+                atask.save_db(database)
         self.database.try_vacuum()
         self.parent.destroy() # quit() won't do when other dialogs were up.
 

@@ -112,6 +112,11 @@ class TaskBase:
 
         time.sleep(0.1)
 
+    def stop(self):
+        """Somehow stop the task"""
+        # we cannot stop a thread for now
+        pass
+
 def install_ui_monkey(ui_obj):
     """Supply a GUI object to UIMonkey"""
     global UI_Monkey
