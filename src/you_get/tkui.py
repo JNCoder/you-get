@@ -64,6 +64,13 @@ class AddTaskDialog(simpledialog.Dialog):
         self.settings = settings
         super().__init__(parent, title)
 
+    def wait_window(self, obj):
+        """Dialog sometime failed to set the right window size.
+        We reset geometry to force autofix widgets
+        """
+        self.geometry("")
+        super().wait_window(obj)
+
     def body(self, master):
         """Create body ui for the dialog"""
         ttk.Label(master, text="URL:").grid(row=0, sticky="e")
