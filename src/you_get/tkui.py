@@ -144,6 +144,10 @@ class AddTaskDialog(simpledialog.Dialog):
             pass
 
         self.result = None
+
+        # Dialog OK by ctrl-return
+        self.bind("<Control-Return>", super().ok)
+
         return self.e_url # initial focus
 
     def ok(self, event=None):
