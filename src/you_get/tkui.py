@@ -69,7 +69,7 @@ class AddTaskDialog(simpledialog.Dialog):
         We reset geometry to force autofix widgets
         """
         self.geometry("")
-        super().wait_window(obj)
+        return super().wait_window(obj)
 
     def body(self, master):
         """Create body ui for the dialog"""
@@ -78,8 +78,25 @@ class AddTaskDialog(simpledialog.Dialog):
         ttk.Label(master, text="Extractor Proxy:").grid(row=2, sticky="e")
         ttk.Label(master, text="Playlist:").grid(row=3, sticky="e")
 
+        # Info Text View
+        frame_text = self.frame_text = ttk.Frame(master)
+        self.e_url = textview = tkinter.Text(frame_text, font="monospace",
+                exportselection=False, wrap="none",
+                width=80, height=10,
+                )
+        hsb_text = ttk.Scrollbar(frame_text, orient="horizontal",
+                command=textview.xview)
+        vsb_text = ttk.Scrollbar(frame_text, orient="vertical",
+                command=textview.yview)
+        textview.configure(xscrollcommand=hsb_text.set,
+                yscrollcommand=vsb_text.set)
 
-        self.e_url = ttk.Entry(master, width=80, exportselection=False)
+        hsb_text.grid(row=1, column=0, sticky="ew")
+        vsb_text.grid(row=0, column=1, sticky="ns")
+        textview.grid(row=0, column=0, in_=frame_text, sticky="news")
+        frame_text.columnconfigure(0, weight=1)
+        frame_text.rowconfigure(0, weight=1)
+
         self.e_dir = ttk.Entry(master, width=80)
         self.e_xproxy = ttk.Entry(master, width=80)
 
@@ -92,9 +109,9 @@ class AddTaskDialog(simpledialog.Dialog):
 
         padx = 6
         pady = 4
-        self.e_url.grid(row=0, column=1, padx=padx, pady=pady,)
-        self.e_dir.grid(row=1, column=1, padx=padx, pady=pady,)
-        self.e_xproxy.grid(row=2, column=1, padx=padx, pady=pady,)
+        frame_text.grid(row=0, column=1, padx=padx, pady=pady, sticky="news")
+        self.e_dir.grid(row=1, column=1, padx=padx, pady=pady, sticky="ew")
+        self.e_xproxy.grid(row=2, column=1, padx=padx, pady=pady, sticky="ew")
         self.c_uxproxy.grid(row=2, column=2, padx=padx, pady=pady, sticky="w")
 
         self.b_browse = ttk.Button(master, text="Browse", underline="0",
@@ -117,17 +134,24 @@ class AddTaskDialog(simpledialog.Dialog):
 
         # init URL entry with clipboard content
         try:
-            clip_text = self.e_url.selection_get()
+            clip_text = self.e_url.selection_get().strip()
             if clip_text and clip_text.startswith("http"):
-                self.e_url.delete(0, "end")
-                self.e_url.insert(0, clip_text)
-                self.e_url.select_range(0, "end")
+                self.e_url.delete("1.0", "end")
+                self.e_url.insert("1.0", clip_text)
+                self.e_url.tag_add("sel", "1.0", "end")
         except tkinter.TclError:
             # nothing in clipboard/selection
             pass
 
         self.result = None
         return self.e_url # initial focus
+
+    def ok(self, event=None):
+        """simpledialog.Dialog catch "<Return>" event as OK."""
+        if event is not None and event.widget == self.e_url:
+            return 'break'
+        else:
+            return super().ok(event)
 
     def on_use_xproxy_changed(self, *args):
         if self.use_xproxy_var.get():
@@ -151,7 +175,7 @@ class AddTaskDialog(simpledialog.Dialog):
 
     def apply(self):
         """Once done, collect use input"""
-        url = self.e_url.get()
+        url = self.e_url.get("1.0", "end").strip()
         output_dir = self.e_dir.get()
         extractor_proxy = self.e_xproxy.get()
         use_xproxy = True if self.use_xproxy_var.get() else False
@@ -442,9 +466,20 @@ class App(ttk.Frame):
                     if not info["use_extractor_proxy"]:
                         info["extractor_proxy"] = None
                     del info["use_extractor_proxy"]
-                    atask = self.task_manager.start_download(info)
-                    self.task_manager.queue_tasks([atask])
-                    self.attach_download_task(atask)
+
+                    urls = info["url"].splitlines()
+                    task_list = []
+                    for url in urls:
+                        dinfo = info.copy()
+                        dinfo["url"] = url.strip()
+                        try:
+                            atask = self.task_manager.start_download(dinfo)
+                            self.attach_download_task(atask)
+                            task_list.append(atask)
+                        except task_manager.TaskError:
+                            pass
+                    if task_list:
+                        self.task_manager.queue_tasks(task_list)
         except task_manager.TaskError as err:
             msg = str(err)
             messagebox.showerror(title="You-Get Error", message=msg)
