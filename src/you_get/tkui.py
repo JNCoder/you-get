@@ -135,7 +135,7 @@ class AddTaskDialog(simpledialog.Dialog):
         # init URL entry with clipboard content
         try:
             clip_text = self.e_url.selection_get().strip()
-            if clip_text and clip_text.startswith("http"):
+            if clip_text and "http" in clip_text:
                 self.e_url.delete("1.0", "end")
                 self.e_url.insert("1.0", clip_text)
                 self.e_url.tag_add("sel", "1.0", "end")
@@ -461,32 +461,34 @@ class App(ttk.Frame):
         dialog = AddTaskDialog(self.parent, "You-Get New Download",
                 self.settings)
         info = dialog.result
-        try:
-            if info:
-                if info["url"].startswith("http"):
-                    self.settings.update(info)
+        if info and "http" in info["url"]:
+            self.settings.update(info)
+            err_msg = []
 
-                    # clean up options
-                    if not info["use_extractor_proxy"]:
-                        info["extractor_proxy"] = None
-                    del info["use_extractor_proxy"]
+            # clean up options
+            if not info["use_extractor_proxy"]:
+                info["extractor_proxy"] = None
+            del info["use_extractor_proxy"]
 
-                    urls = info["url"].splitlines()
-                    task_list = []
-                    for url in urls:
-                        dinfo = info.copy()
-                        dinfo["url"] = url.strip()
-                        try:
-                            atask = self.task_manager.start_download(dinfo)
-                            self.attach_download_task(atask)
-                            task_list.append(atask)
-                        except task_manager.TaskError:
-                            pass
-                    if task_list:
-                        self.task_manager.queue_tasks(task_list)
-        except task_manager.TaskError as err:
-            msg = str(err)
-            messagebox.showerror(title="You-Get Error", message=msg)
+            urls = info["url"].splitlines()
+            task_list = []
+            for url in urls:
+                url = url.strip()
+                if not url.startswith("http"):
+                    continue
+                dinfo = info.copy()
+                dinfo["url"] = url.strip()
+                try:
+                    atask = self.task_manager.start_download(dinfo)
+                    self.attach_download_task(atask)
+                    task_list.append(atask)
+                except task_manager.TaskError as err:
+                    err_msg.append(str(err))
+            if task_list:
+                self.task_manager.queue_tasks(task_list)
+            if err_msg:
+                msg = "\n".join(err_msg)
+                messagebox.showerror(title="You-Get Error", message=msg)
 
     def restart_selected_task(self, *args):
         origins = self.tree_task.selection()
