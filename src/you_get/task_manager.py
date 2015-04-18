@@ -281,7 +281,7 @@ class Task(thread_monkey_patch.TaskBase):
         self.options = {
                 "url": None,
                 "do_playlist": False,
-                "output_dir": ".",
+                "output_dir": os.getcwd(),
                 "merge": True,
                 "extractor_proxy": None,
                 "stream_id": None,

@@ -233,7 +233,7 @@ class App(ttk.Frame):
 
         self.setup_ui()
         self.settings = {
-                "output_dir": os.path.abspath("."),
+                "output_dir": os.getcwd(),
                 }
         self.database = self.new_database()
         self.parent.after(100, self.delay_init)
