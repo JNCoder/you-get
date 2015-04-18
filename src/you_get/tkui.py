@@ -64,6 +64,13 @@ class AddTaskDialog(simpledialog.Dialog):
         self.settings = settings
         super().__init__(parent, title)
 
+    def wait_window(self, obj):
+        """Dialog sometime failed to set the right window size.
+        We reset geometry to force autofix widgets
+        """
+        self.geometry("")
+        return super().wait_window(obj)
+
     def body(self, master):
         """Create body ui for the dialog"""
         ttk.Label(master, text="URL:").grid(row=0, sticky="e")
@@ -71,8 +78,25 @@ class AddTaskDialog(simpledialog.Dialog):
         ttk.Label(master, text="Extractor Proxy:").grid(row=2, sticky="e")
         ttk.Label(master, text="Playlist:").grid(row=3, sticky="e")
 
+        # Info Text View
+        frame_text = self.frame_text = ttk.Frame(master)
+        self.e_url = textview = tkinter.Text(frame_text, font="monospace",
+                exportselection=False, wrap="none",
+                width=80, height=10,
+                )
+        hsb_text = ttk.Scrollbar(frame_text, orient="horizontal",
+                command=textview.xview)
+        vsb_text = ttk.Scrollbar(frame_text, orient="vertical",
+                command=textview.yview)
+        textview.configure(xscrollcommand=hsb_text.set,
+                yscrollcommand=vsb_text.set)
 
-        self.e_url = ttk.Entry(master, width=80, exportselection=False)
+        hsb_text.grid(row=1, column=0, sticky="ew")
+        vsb_text.grid(row=0, column=1, sticky="ns")
+        textview.grid(row=0, column=0, in_=frame_text, sticky="news")
+        frame_text.columnconfigure(0, weight=1)
+        frame_text.rowconfigure(0, weight=1)
+
         self.e_dir = ttk.Entry(master, width=80)
         self.e_xproxy = ttk.Entry(master, width=80)
 
@@ -85,9 +109,9 @@ class AddTaskDialog(simpledialog.Dialog):
 
         padx = 6
         pady = 4
-        self.e_url.grid(row=0, column=1, padx=padx, pady=pady,)
-        self.e_dir.grid(row=1, column=1, padx=padx, pady=pady,)
-        self.e_xproxy.grid(row=2, column=1, padx=padx, pady=pady,)
+        frame_text.grid(row=0, column=1, padx=padx, pady=pady, sticky="news")
+        self.e_dir.grid(row=1, column=1, padx=padx, pady=pady, sticky="ew")
+        self.e_xproxy.grid(row=2, column=1, padx=padx, pady=pady, sticky="ew")
         self.c_uxproxy.grid(row=2, column=2, padx=padx, pady=pady, sticky="w")
 
         self.b_browse = ttk.Button(master, text="Browse", underline="0",
@@ -110,17 +134,28 @@ class AddTaskDialog(simpledialog.Dialog):
 
         # init URL entry with clipboard content
         try:
-            clip_text = self.e_url.selection_get()
-            if clip_text and clip_text.startswith("http"):
-                self.e_url.delete(0, "end")
-                self.e_url.insert(0, clip_text)
-                self.e_url.select_range(0, "end")
+            clip_text = self.e_url.selection_get().strip()
+            if clip_text and "http" in clip_text:
+                self.e_url.delete("1.0", "end")
+                self.e_url.insert("1.0", clip_text)
+                self.e_url.tag_add("sel", "1.0", "end")
         except tkinter.TclError:
             # nothing in clipboard/selection
             pass
 
         self.result = None
+
+        # Dialog OK by ctrl-return
+        self.bind("<Control-Return>", super().ok)
+
         return self.e_url # initial focus
+
+    def ok(self, event=None):
+        """simpledialog.Dialog catch "<Return>" event as OK."""
+        if event is not None and event.widget == self.e_url:
+            return 'break'
+        else:
+            return super().ok(event)
 
     def on_use_xproxy_changed(self, *args):
         if self.use_xproxy_var.get():
@@ -144,7 +179,7 @@ class AddTaskDialog(simpledialog.Dialog):
 
     def apply(self):
         """Once done, collect use input"""
-        url = self.e_url.get()
+        url = self.e_url.get("1.0", "end").strip()
         output_dir = self.e_dir.get()
         extractor_proxy = self.e_xproxy.get()
         use_xproxy = True if self.use_xproxy_var.get() else False
@@ -198,7 +233,7 @@ class App(ttk.Frame):
 
         self.setup_ui()
         self.settings = {
-                "output_dir": os.path.abspath("."),
+                "output_dir": os.getcwd(),
                 }
         self.database = self.new_database()
         self.parent.after(100, self.delay_init)
@@ -426,21 +461,34 @@ class App(ttk.Frame):
         dialog = AddTaskDialog(self.parent, "You-Get New Download",
                 self.settings)
         info = dialog.result
-        try:
-            if info:
-                if info["url"].startswith("http"):
-                    self.settings.update(info)
+        if info and "http" in info["url"]:
+            self.settings.update(info)
+            err_msg = []
 
-                    # clean up options
-                    if not info["use_extractor_proxy"]:
-                        info["extractor_proxy"] = None
-                    del info["use_extractor_proxy"]
-                    atask = self.task_manager.start_download(info)
-                    self.task_manager.queue_tasks([atask])
+            # clean up options
+            if not info["use_extractor_proxy"]:
+                info["extractor_proxy"] = None
+            del info["use_extractor_proxy"]
+
+            urls = info["url"].splitlines()
+            task_list = []
+            for url in urls:
+                url = url.strip()
+                if not url.startswith("http"):
+                    continue
+                dinfo = info.copy()
+                dinfo["url"] = url.strip()
+                try:
+                    atask = self.task_manager.start_download(dinfo)
                     self.attach_download_task(atask)
-        except task_manager.TaskError as err:
-            msg = str(err)
-            messagebox.showerror(title="You-Get Error", message=msg)
+                    task_list.append(atask)
+                except task_manager.TaskError as err:
+                    err_msg.append(str(err))
+            if task_list:
+                self.task_manager.queue_tasks(task_list)
+            if err_msg:
+                msg = "\n".join(err_msg)
+                messagebox.showerror(title="You-Get Error", message=msg)
 
     def restart_selected_task(self, *args):
         origins = self.tree_task.selection()
