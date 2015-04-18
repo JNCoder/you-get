@@ -381,7 +381,7 @@ class App:
             "port": 8080,
             "data_dir": os.path.join(task_manager.setup_data_folder(APPNAME),
                 "webui"),
-            "output_dir": os.path.abspath("."),
+            "output_dir": os.getcwd(),
             "debug": False,
             }
     def __init__(self, args):
