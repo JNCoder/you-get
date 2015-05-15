@@ -286,9 +286,10 @@ class App(ttk.Frame):
                 anchor="e")
         tree_task.column("speed", stretch=False, width=speed_column_width,
                 anchor="e")
-        tree_task.bind("<<TreeviewSelect>>", self.on_treeview_select_changed)
+        tree_task.bind("<<TreeviewSelect>>", self.on_tree_task_select_changed)
         tree_task.bind("<Control-r>", self.restart_selected_task)
         tree_task.bind("<Delete>", self.remove_selected_task)
+        tree_task.bind("<Double-1>", self.on_tree_task_double_click)
 
         tree_task.grid(row=0, column=0, sticky="news")
         hsb.grid(row=1, column=0, sticky="ew")
@@ -409,7 +410,7 @@ class App(ttk.Frame):
         for atask in tasks:
             self.attach_download_task(atask)
 
-    def on_treeview_select_changed(self, evt):
+    def on_tree_task_select_changed(self, evt):
         tree = self.tree_task
         origins = tree.selection()
         if not origins: return
@@ -455,6 +456,14 @@ class App(ttk.Frame):
         self.textview.delete("1.0", "end")
         self.textview.insert("1.0", msg)
         self.textview.configure(state="disabled")
+
+    def on_tree_task_double_click(self, event):
+        tree = self.tree_task
+        origin = tree.identify("item", event.x, event.y)
+        atask = self.task_manager.get_task(origin)
+        output_dir = atask.options["output_dir"]
+        import webbrowser
+        webbrowser.open(output_dir, new=1)
 
     def on_new_download(self, *args):
         """event handler for new download"""
