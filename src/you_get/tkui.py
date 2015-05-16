@@ -19,6 +19,7 @@ from . import common
 from .util import log
 
 APPNAME = "you-get"
+FONT_SIZE = 16
 LOG_QUEUE_SIZE = 100
 MAX_LOG_LINES = 400
 LOG_COLOR_CODES = {
@@ -79,8 +80,9 @@ class AddTaskDialog(simpledialog.Dialog):
         ttk.Label(master, text="Playlist:").grid(row=3, sticky="e")
 
         # Info Text View
+        font_style = "monospace {}".format(FONT_SIZE)
         frame_text = self.frame_text = ttk.Frame(master)
-        self.e_url = textview = tkinter.Text(frame_text, font="monospace",
+        self.e_url = textview = tkinter.Text(frame_text, font=font_style,
                 exportselection=False, wrap="none",
                 width=80, height=10,
                 )
@@ -301,8 +303,9 @@ class App(ttk.Frame):
         notebook = self.notebook = ttk.Notebook(paned_window)
 
         # Info Text View
+        font_style = "monospace {}".format(FONT_SIZE)
         frame_text = self.frame_text = ttk.Frame(notebook)
-        textview = self.textview = tkinter.Text(frame_text, font="monospace",
+        textview = self.textview = tkinter.Text(frame_text, font=font_style,
                 wrap="none", undo=False, state="disabled")
         hsb_text = ttk.Scrollbar(frame_text, orient="horizontal",
                 command=textview.xview)
@@ -320,7 +323,7 @@ class App(ttk.Frame):
 
         # Log Text View
         frame_log = self.frame_log = ttk.Frame(notebook)
-        text_log = self.text_log = tkinter.Text(frame_log, font="monospace",
+        text_log = self.text_log = tkinter.Text(frame_log, font=font_style,
                 wrap="none", undo=False, state="disabled")
         hsb_log = ttk.Scrollbar(frame_log, orient="horizontal",
                 command=text_log.xview)
